@@ -838,6 +838,16 @@ class DJAppUI:
                     return i
         return self.get_selected_idx()
 
+    def select_first_track(self):
+        """Selects and focuses the first track in the treeview if it exists."""
+        if self.project.tracks and self.tree.get_children():
+            first_item = self.tree.get_children()[0]
+            self.tree.selection_set(first_item)
+            self.tree.focus(first_item)
+            self.tree.see(first_item)
+            self.tree.focus_set()
+            self.tree.event_generate("<<TreeviewSelect>>")
+
     def auto_load_last_session(self):
         last_folder = self.project.load_app_memory()
         if last_folder: self.project_actions.load_saved_set(preset_folder=last_folder)

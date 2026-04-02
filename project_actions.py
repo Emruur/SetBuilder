@@ -63,11 +63,20 @@ class ProjectActions:
         folder = preset_folder if preset_folder else filedialog.askdirectory(title="Select Saved Set", initialdir=initial_ws)
         if not folder: return
         
+        meta_path = os.path.join(folder, "metadata", "tracks.json")
+
+        if not os.path.exists(meta_path):
+            if messagebox.askyesno("Project Not Found", "This folder does not contain project metadata.\n\nWould you like to scan it for audio files and create a new project here?", parent=self.root):
+                self._import_folder_as_new_project(folder)
+            return
+
         try:
-            with open(os.path.join(folder, "metadata", "tracks.json"), "r") as f:
+            with open(meta_path, "r") as f:
                 raw_data = json.load(f)
         except Exception:
-            return 
+            if messagebox.askyesno("Project Corrupted", "Project metadata is unreadable.\n\nWould you like to attempt to rebuild the project from the audio files in this folder?", parent=self.root):
+                self._import_folder_as_new_project(folder)
+            return
 
         self.audio.unload()
         self.project.current_folder = folder
@@ -122,17 +131,69 @@ class ProjectActions:
         if self.app.vinyl_animator:
             self.app.vinyl_animator.update_artwork(None)
             self.app.vinyl_animator.set_speed(0.0)
-        
-        if self.project.tracks:
-            first = self.app.tree.get_children()[0]
-            self.app.tree.selection_set(first)
-            self.app.tree.focus(first)
-            self.app.tree.focus_set()
-            self.app.tree.event_generate("<<TreeviewSelect>>")
 
-    def add_tracks(self):
+        self.app.select_first_track()
+
+    def _import_folder_as_new_project(self, folder):
+        # Find audio files
+        audio_files = []
+        valid_exts = ['.mp3', '.wav', '.flac']
+        for f in sorted(os.listdir(folder)):
+            if any(f.lower().endswith(ext) for ext in valid_exts) and not f.startswith('.'):
+                audio_files.append(f)
+        
+        if not audio_files:
+            messagebox.showinfo("No Audio Found", "No compatible audio files (.mp3, .wav, .flac) were found in this folder.", parent=self.root)
+            return
+
+        # Check for existing numerical order to decide on final sorting
+        import re
+        numbered_files = []
+        has_unnumbered = False
+        for f_name in audio_files:
+            match = re.match(r'^(\d+)\s*[-_.]*\s*(.*)', f_name)
+            if match:
+                numbered_files.append({'filename': f_name, 'num': int(match.group(1))})
+            else:
+                has_unnumbered = True
+                break
+        
+        use_existing_order = False
+        if not has_unnumbered and len(numbered_files) == len(audio_files):
+            numbered_files.sort(key=lambda x: x['num'])
+            files_to_process = [f['filename'] for f in numbered_files]
+            use_existing_order = True
+        else:
+            files_to_process = audio_files
+
+        # Set up project state for a new project in this folder
+        self.audio.unload()
+        self.project.current_folder = folder
+        self.project.is_saved_set = True
+        self.project.tracks = []
+        self.project.settings = {"normalized": False, "lufs_target": -14.0}
+        
+        self.app.refresh_tree()
+        self.app.progress_var.set(0)
+        self.app.progress_bar.pack_forget()
+        self.app.update_norm_led()
+        
+        self.app.lbl_folder.config(text=f"Project: {os.path.basename(folder)}")
+        self.app.btn_add.config(state=tk.NORMAL)
+        
+        if self.app.vinyl_animator:
+            self.app.vinyl_animator.update_artwork(None)
+            self.app.vinyl_animator.set_speed(0.0)
+
+        self.project.save_metadata(folder)
+        self.project.save_app_memory()
+        
+        self.add_tracks(files=[os.path.join(folder, f) for f in files_to_process], sort_by_bpm_at_end=not use_existing_order, select_first_at_end=True)
+
+    def add_tracks(self, files=None, sort_by_bpm_at_end=False, select_first_at_end=False):
         if not self.project.is_saved_set: return
-        files = filedialog.askopenfilenames(title="Select Tracks to Import", filetypes=[("Audio Files", "*.mp3 *.wav *.flac")], parent=self.root)
+        if not files:
+            files = filedialog.askopenfilenames(title="Select Tracks to Import", filetypes=[("Audio Files", "*.mp3 *.wav *.flac")], parent=self.root)
         if not files: return
         
         normalize_new = False
@@ -144,9 +205,10 @@ class ProjectActions:
         self.app.lbl_folder.config(text=f"Importing {len(files)} tracks...")
         self.app.progress_bar.pack(fill=tk.X, pady=5)
         self.app.progress_var.set(0)
-        threading.Thread(target=self.add_tracks_worker, args=(list(files), normalize_new, self.project.is_bpm_sorted()), daemon=True).start()
+        should_sort = self.project.is_bpm_sorted() or sort_by_bpm_at_end
+        threading.Thread(target=self.add_tracks_worker, args=(list(files), normalize_new, should_sort, select_first_at_end), daemon=True).start()
 
-    def add_tracks_worker(self, filepaths, normalize_new, was_sorted):
+    def add_tracks_worker(self, filepaths, normalize_new, was_sorted, select_first_at_end=False):
         total, lufs_target = len(filepaths), self.project.settings.get("lufs_target", -14.0)
         for i, filepath in enumerate(filepaths):
             path_obj, ext = Path(filepath), Path(filepath).suffix.lower()
@@ -193,4 +255,16 @@ class ProjectActions:
                 })
             except Exception as e: print(f"Error adding track: {e}")
             self.root.after(0, self.app.progress_var.set, ((i + 1) / total) * 100)
-        self.root.after(0, lambda: [self.project.resort_by_bpm() if was_sorted else None, self.app.refresh_tree(), self.app.lbl_folder.config(text=f"Loaded: {os.path.basename(self.project.current_folder)}"), self.app.btn_add.config(state=tk.NORMAL), self.app.progress_bar.pack_forget(), setattr(self.project, 'needs_save', True)])
+
+        def on_done():
+            if was_sorted:
+                self.project.resort_by_bpm()
+            self.app.refresh_tree()
+            self.app.lbl_folder.config(text=f"Loaded: {os.path.basename(self.project.current_folder)}")
+            self.app.btn_add.config(state=tk.NORMAL)
+            self.app.progress_bar.pack_forget()
+            self.project.needs_save = True
+            if select_first_at_end:
+                self.app.select_first_track()
+
+        self.root.after(0, on_done)
