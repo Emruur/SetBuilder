@@ -126,6 +126,8 @@ class ProjectActions:
         if self.project.tracks:
             first = self.app.tree.get_children()[0]
             self.app.tree.selection_set(first)
+            self.app.tree.focus(first)
+            self.app.tree.focus_set()
             self.app.tree.event_generate("<<TreeviewSelect>>")
 
     def add_tracks(self):

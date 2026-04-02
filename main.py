@@ -12,7 +12,6 @@ from ProjectManager import ProjectState
 from PIL import Image, ImageTk, ImageOps
 
 from constants import BG_MAIN, BG_LIST, FG_TEXT, BTN_NORMAL, BTN_HOVER, HIGHLIGHT, BORDER, VINYL_SIZE, CENTER_HOLE
-from constants import BG_MAIN, BG_LIST, FG_TEXT, BTN_NORMAL, BTN_HOVER, HIGHLIGHT, MULTI_SELECT, BORDER, VINYL_SIZE, CENTER_HOLE
 from ui_components import create_btn, create_group_frame, Knob, Timeline
 from export_dialog import ExportDialog
 from vinyl_animator import VinylAnimator
@@ -83,7 +82,6 @@ class DJAppUI:
 
         style.configure("Treeview", background=BG_LIST, foreground=FG_TEXT, fieldbackground=BG_LIST, borderwidth=0, rowheight=42, font=("Courier", 11))
         style.map('Treeview', background=[('selected', HIGHLIGHT)], foreground=[('selected', '#ffffff')])
-        style.map('Treeview', background=[('selected', 'focus', HIGHLIGHT), ('selected', MULTI_SELECT)], foreground=[('selected', '#ffffff')])
         style.configure("Treeview.Heading", background=BTN_NORMAL, foreground=FG_TEXT, font=("Helvetica", 9, "bold"), borderwidth=1)
 
         top_frame = tk.Frame(self.root, bg=BG_MAIN)
@@ -371,7 +369,6 @@ class DJAppUI:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         columns = ("num", "bpm", "tone", "artist", "album", "song", "size", "lufs", "norm")
         self.tree = ttk.Treeview(list_frame, columns=columns, show="tree headings", yscrollcommand=scrollbar.set, selectmode="browse", style="Treeview")
-        self.tree = ttk.Treeview(list_frame, columns=columns, show="tree headings", yscrollcommand=scrollbar.set, selectmode="extended", style="Treeview")
         
         self.tree.heading("#0", text="Art")
         self.tree.column("#0", width=60, anchor=tk.CENTER, stretch=tk.NO)
@@ -833,10 +830,6 @@ class DJAppUI:
         selected = self.tree.selection()
         if not selected: return None
         return self.tree.index(selected[0])
-        focused = self.tree.focus()
-        if focused and focused in selected:
-            return self.tree.index(focused)
-        return self.tree.index(selected[-1])
 
     def get_active_idx(self):
         if self.audio.current_track and not self.audio.is_paused:
@@ -994,8 +987,6 @@ class DJAppUI:
     # --- RESTORED: Transport logic ---
     def on_arrow_override(self, event):
         if isinstance(event.widget, (tk.Entry, ttk.Combobox)): return
-        if event.state & 0x0001 and event.keysym.lower() in ['up', 'down']:
-            return
         self.handle_arrows(event.keysym.lower())
         return "break"
 
@@ -1152,32 +1143,8 @@ class DJAppUI:
         if not self.project.tracks: return
         if messagebox.askyesno("Re-Sort", "Reorganize list by BPM?"):
             self.project.resort_by_bpm()
-        selected_items = self.tree.selection()
-        is_selection = len(selected_items) > 1
-        
-        win = tk.Toplevel(self.root)
-        win.title("Sort Tracks")
-        win.geometry("340x200")
-        win.configure(bg=BG_MAIN)
-        win.grab_set()
-        
-        target_text = "the selected tracks" if is_selection else "the whole list"
-        tk.Label(win, text=f"How do you want to sort {target_text}?", bg=BG_MAIN, fg=FG_TEXT, font=("Helvetica", 10)).pack(pady=15, padx=10)
-        
-        def apply_sort(method):
-            indices = [self.tree.index(item) for item in selected_items] if is_selection else None
-            self.project.sort_tracks(method=method, indices=indices)
             self.refresh_tree()
             self.project.needs_save = True
-            if indices:
-                for idx in indices:
-                    try: self.tree.selection_add(self.tree.get_children()[idx])
-                    except IndexError: pass
-            win.destroy()
-            
-        self.create_btn(win, "Sort by BPM", lambda: apply_sort("bpm"), BTN_NORMAL, width=22, bold=True).pack(pady=5)
-        self.create_btn(win, "Sort by Key (Grouped)", lambda: apply_sort("key"), BTN_NORMAL, width=22, bold=True).pack(pady=5)
-        self.create_btn(win, "Cancel", win.destroy, "#444444", width=22).pack(pady=5)
 
     def refresh_tree(self):
         for item in self.tree.get_children():

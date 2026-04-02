@@ -5,7 +5,6 @@ FG_TEXT = "#eeeeee"
 BTN_NORMAL = "#3a3a3a"
 BTN_HOVER = "#555555" # Keep hover color distinct
 HIGHLIGHT = "#DC9230" # Changed from blue to orange
-MULTI_SELECT = "#6e6e5f" # Light gray with a hint of yellow for multiple selection
 BORDER = "#444444"
 
 VINYL_SIZE = 220 
