@@ -367,15 +367,17 @@ class DJAppUI:
         list_frame.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical")
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        columns = ("bpm", "tone", "filename", "size", "lufs", "norm")
+        columns = ("#", "bpm", "tone", "filename", "size", "lufs", "norm")
         self.tree = ttk.Treeview(list_frame, columns=columns, show="headings", yscrollcommand=scrollbar.set, selectmode="browse", style="Treeview")
         
+        self.tree.heading("#", text="#")
+        self.tree.column("#", width=40, anchor=tk.CENTER, stretch=tk.NO)
         self.tree.heading("bpm", text="BPM")
         self.tree.column("bpm", width=70, anchor=tk.CENTER)
         self.tree.heading("tone", text="Key")
         self.tree.column("tone", width=60, anchor=tk.CENTER)
-        self.tree.heading("filename", text="Filename")
-        self.tree.column("filename", width=400, anchor=tk.W)
+        self.tree.heading("filename", text="Track Name")
+        self.tree.column("filename", width=360, anchor=tk.W)
         self.tree.heading("size", text="Size")
         self.tree.column("size", width=70, anchor=tk.E)
         self.tree.heading("lufs", text="LUFS")
@@ -1086,15 +1088,16 @@ class DJAppUI:
         for item in self.tree.get_children():
             self.tree.delete(item)
             
-        for track in self.project.tracks:
+        for i, track in enumerate(self.project.tracks):
             norm_dot = "●" if track.get('is_normalized', False) else "○"
             size_str = f"{track.get('size_mb', 0.0):.1f}MB"
             lufs_str = f"{track.get('lufs', -14.0):.1f}LUFS"
             
             self.tree.insert("", tk.END, values=(
+                f"{i + 1}",
                 f"{track['bpm']}", 
                 f"{track['tone']}", 
-                track['filename'], 
+                track.get('original_name', track['filename']), 
                 size_str, 
                 lufs_str, 
                 norm_dot

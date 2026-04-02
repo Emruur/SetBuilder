@@ -164,6 +164,14 @@ class ExportDialog:
                             os.replace(dest_path, final_path)
                             
                     track['filename'] = new_filename
+                    if not in_place:
+                        thumb_filename = track.get('thumb_filename', '')
+                        if thumb_filename:
+                            src_thumb = os.path.join(self.app.project.current_folder, thumb_filename)
+                            dst_thumb = os.path.join(export_dir, thumb_filename)
+                            if os.path.exists(src_thumb) and src_thumb != dst_thumb:
+                                try: shutil.copy2(src_thumb, dst_thumb)
+                                except Exception: pass
                     if normalize:
                         track['is_normalized'] = True
                         track['lufs'] = lufs_target

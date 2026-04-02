@@ -98,7 +98,7 @@ class ProjectActions:
                     except Exception: t['duration'] = 0.0
                 
                 self.project.tracks.append({
-                    "filename": fname, "original_name": t.get("original_name", fname),
+                    "filename": fname, "original_name": t.get("original_name", self.project.clean_name(fname)),
                     "bpm": int(t.get("bpm", 0)), "tone": str(t.get("tone", "?")),
                     "duration": float(t.get("duration", 0.0)), "volume": float(t.get("volume", 100.0)),
                     "lufs": float(t.get("lufs", -14.0)), "size_mb": float(t.get("size_mb", 0.0)),
