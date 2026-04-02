@@ -9,7 +9,7 @@ from tkinter import messagebox, ttk, filedialog
 
 from AudioCore import AudioEngine
 from ProjectManager import ProjectState
-from PIL import Image, ImageTk
+from PIL import Image, ImageTk, ImageOps
 
 from constants import BG_MAIN, BG_LIST, FG_TEXT, BTN_NORMAL, BTN_HOVER, HIGHLIGHT, BORDER, VINYL_SIZE, CENTER_HOLE
 from ui_components import create_btn, create_group_frame, Knob, Timeline
@@ -80,7 +80,7 @@ class DJAppUI:
         self.root.option_add('*TCombobox*Listbox.selectBackground', HIGHLIGHT)
         self.root.option_add('*TCombobox*Listbox.selectForeground', '#ffffff')
 
-        style.configure("Treeview", background=BG_LIST, foreground=FG_TEXT, fieldbackground=BG_LIST, borderwidth=0, rowheight=25, font=("Courier", 10))
+        style.configure("Treeview", background=BG_LIST, foreground=FG_TEXT, fieldbackground=BG_LIST, borderwidth=0, rowheight=42, font=("Courier", 11))
         style.map('Treeview', background=[('selected', HIGHLIGHT)], foreground=[('selected', '#ffffff')])
         style.configure("Treeview.Heading", background=BTN_NORMAL, foreground=FG_TEXT, font=("Helvetica", 9, "bold"), borderwidth=1)
 
@@ -367,28 +367,45 @@ class DJAppUI:
         list_frame.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical")
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        columns = ("#", "bpm", "tone", "filename", "size", "lufs", "norm")
-        self.tree = ttk.Treeview(list_frame, columns=columns, show="headings", yscrollcommand=scrollbar.set, selectmode="browse", style="Treeview")
+        columns = ("num", "bpm", "tone", "artist", "album", "song", "size", "lufs", "norm")
+        self.tree = ttk.Treeview(list_frame, columns=columns, show="tree headings", yscrollcommand=scrollbar.set, selectmode="browse", style="Treeview")
         
-        self.tree.heading("#", text="#")
-        self.tree.column("#", width=40, anchor=tk.CENTER, stretch=tk.NO)
+        self.tree.heading("#0", text="Art")
+        self.tree.column("#0", width=60, anchor=tk.CENTER, stretch=tk.NO)
+        
+        self.tree.heading("num", text="#")
+        self.tree.column("num", width=30, anchor=tk.CENTER, stretch=tk.NO)
+
         self.tree.heading("bpm", text="BPM")
-        self.tree.column("bpm", width=70, anchor=tk.CENTER)
+        self.tree.column("bpm", width=50, anchor=tk.CENTER, stretch=tk.NO)
         self.tree.heading("tone", text="Key")
-        self.tree.column("tone", width=60, anchor=tk.CENTER)
-        self.tree.heading("filename", text="Track Name")
-        self.tree.column("filename", width=360, anchor=tk.W)
+        self.tree.column("tone", width=50, anchor=tk.CENTER, stretch=tk.NO)
+        self.tree.heading("artist", text="Artist")
+        self.tree.column("artist", width=120, anchor=tk.W, stretch=tk.YES)
+        self.tree.heading("album", text="Album")
+        self.tree.column("album", width=120, anchor=tk.W, stretch=tk.YES)
+        self.tree.heading("song", text="Song")
+        self.tree.column("song", width=160, anchor=tk.W, stretch=tk.YES)
         self.tree.heading("size", text="Size")
-        self.tree.column("size", width=70, anchor=tk.E)
+        self.tree.column("size", width=50, anchor=tk.E, stretch=tk.NO)
         self.tree.heading("lufs", text="LUFS")
-        self.tree.column("lufs", width=80, anchor=tk.E)
+        self.tree.column("lufs", width=50, anchor=tk.E, stretch=tk.NO)
         self.tree.heading("norm", text="Norm")
-        self.tree.column("norm", width=50, anchor=tk.CENTER)
+        self.tree.column("norm", width=40, anchor=tk.CENTER, stretch=tk.NO)
 
         self.tree.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
         scrollbar.config(command=self.tree.yview)
         
         self.tree.bind('<<TreeviewSelect>>', self.on_tree_select)
+
+        def prevent_art_resize(event):
+            if self.tree.identify_region(event.x, event.y) == "separator" and self.tree.identify_column(event.x) == "#0":
+                return "break"
+        
+        self.tree.bind('<Button-1>', prevent_art_resize, add='+')
+        self.tree.bind('<B1-Motion>', prevent_art_resize, add='+')
+        self.tree.bind('<Double-1>', self.on_double_click)
+
 
         # --- RIGHT PANEL ---
         right_control_frame = tk.Frame(mid_frame, bg=BG_MAIN)
@@ -899,6 +916,47 @@ class DJAppUI:
         else:
             self.vinyl_animator.update_artwork(None)
 
+    def on_double_click(self, event):
+        row_id = self.tree.identify_row(event.y)
+        col_id = self.tree.identify_column(event.x)
+
+        if not row_id: return
+
+        # Allow editing Artist (#4), Album (#5), and Song (#6)
+        if col_id in ("#4", "#5", "#6"):
+            col_map = {"#4": "artist", "#5": "album", "#6": "song"}
+            data_key = col_map[col_id]
+
+            bbox = self.tree.bbox(row_id, col_id)
+            if not bbox: return
+            x, y, width, height = bbox
+
+            val = self.tree.set(row_id, col_id)
+            
+            entry = tk.Entry(self.tree, font=("Courier", 11), bg=BG_LIST, fg=FG_TEXT, selectbackground=HIGHLIGHT, insertbackground=FG_TEXT, highlightthickness=1, highlightcolor=HIGHLIGHT, highlightbackground=HIGHLIGHT)
+            entry.place(x=x, y=y, width=width, height=height)
+            entry.insert(0, val)
+            entry.select_range(0, tk.END)
+            entry.focus_set()
+
+            def save_edit(e=None):
+                if not entry.winfo_exists(): return
+                new_val = entry.get()
+                self.tree.set(row_id, col_id, new_val)
+                idx = self.tree.index(row_id)
+                self.project.tracks[idx][data_key] = new_val
+                self.project.needs_save = True
+                entry.destroy()
+
+            def cancel_edit(e=None):
+                if entry.winfo_exists(): entry.destroy()
+
+            entry.bind("<Return>", save_edit)
+            entry.bind("<FocusOut>", save_edit)
+            entry.bind("<Escape>", cancel_edit)
+        else:
+            self.play_audio() # Standard fast-play on double clicking non-editable areas
+
     def on_tree_select(self, event):
         if hasattr(self, '_sync_timer') and self._sync_timer:
             self.root.after_cancel(self._sync_timer)
@@ -928,19 +986,23 @@ class DJAppUI:
 
     # --- RESTORED: Transport logic ---
     def on_arrow_override(self, event):
+        if isinstance(event.widget, (tk.Entry, ttk.Combobox)): return
         self.handle_arrows(event.keysym.lower())
         return "break"
 
     def on_space_override(self, event):
+        if isinstance(event.widget, (tk.Entry, ttk.Combobox)): return
         self.toggle_play_pause()
         return "break"
 
     def on_key_press(self, event):
+        if isinstance(event.widget, (tk.Entry, ttk.Combobox)): return
         key = event.keysym.lower()
         if key == 'm': self.keys_down['m'] = True
         elif key == 'v': self.keys_down['v'] = True
 
     def on_key_release(self, event):
+        if isinstance(event.widget, (tk.Entry, ttk.Combobox)): return
         key = event.keysym.lower()
         if key == 'm': 
             self.keys_down['m'] = False
@@ -1088,16 +1150,51 @@ class DJAppUI:
         for item in self.tree.get_children():
             self.tree.delete(item)
             
+        self.tree_images = {}
+        
+        default_art_path = os.path.join(os.getcwd(), "app_states", "default.png")
+        if os.path.exists(default_art_path):
+            try:
+                def_img = Image.open(default_art_path).convert("RGBA")
+                def_img = ImageOps.fit(def_img, (36, 36), Image.Resampling.LANCZOS)
+                self.default_thumb = ImageTk.PhotoImage(def_img)
+            except Exception:
+                self.default_thumb = None
+        else:
+            def_img = Image.new("RGBA", (36, 36), (40, 40, 40, 255))
+            self.default_thumb = ImageTk.PhotoImage(def_img)
+            
         for i, track in enumerate(self.project.tracks):
             norm_dot = "●" if track.get('is_normalized', False) else "○"
-            size_str = f"{track.get('size_mb', 0.0):.1f}MB"
-            lufs_str = f"{track.get('lufs', -14.0):.1f}LUFS"
+            size_str = f"{track.get('size_mb', 0.0):.1f}"
+            lufs_str = f"{track.get('lufs', -14.0):.1f}"
             
-            self.tree.insert("", tk.END, values=(
+            artist = track.get('artist', '')
+            album = track.get('album', '')
+            song = track.get('song', track.get('original_name', track['filename']))
+            if not song: song = track.get('original_name', track['filename'])
+            
+            thumb_img = self.default_thumb
+            thumb_filename = track.get('thumb_filename', '')
+            if thumb_filename:
+                thumb_path = os.path.join(self.project.current_folder, thumb_filename)
+                if os.path.exists(thumb_path):
+                    try:
+                        img = Image.open(thumb_path).convert("RGBA")
+                        img = ImageOps.fit(img, (36, 36), Image.Resampling.LANCZOS)
+                        photo = ImageTk.PhotoImage(img)
+                        self.tree_images[i] = photo
+                        thumb_img = photo
+                    except Exception:
+                        pass
+                        
+            self.tree.insert("", tk.END, text="", image=thumb_img if thumb_img else "", values=(
                 f"{i + 1}",
                 f"{track['bpm']}", 
                 f"{track['tone']}", 
-                track.get('original_name', track['filename']), 
+                artist,
+                album,
+                song,
                 size_str, 
                 lufs_str, 
                 norm_dot

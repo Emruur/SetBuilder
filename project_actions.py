@@ -1,6 +1,7 @@
 import os
 import shutil
 import threading
+import time
 import datetime
 import json
 from pathlib import Path
@@ -99,6 +100,8 @@ class ProjectActions:
                 
                 self.project.tracks.append({
                     "filename": fname, "original_name": t.get("original_name", self.project.clean_name(fname)),
+                    "artist": t.get("artist", ""), "album": t.get("album", ""), "song": t.get("song", ""),
+                    "thumb_filename": t.get("thumb_filename", ""),
                     "bpm": int(t.get("bpm", 0)), "tone": str(t.get("tone", "?")),
                     "duration": float(t.get("duration", 0.0)), "volume": float(t.get("volume", 100.0)),
                     "lufs": float(t.get("lufs", -14.0)), "size_mb": float(t.get("size_mb", 0.0)),
@@ -153,8 +156,29 @@ class ProjectActions:
                 if ext in ['.wav', '.flac'] or normalize_new: self.audio.convert_to_mp3(path_obj, dest_path, normalize=normalize_new, lufs=lufs_target, volume=1.0)
                 else: shutil.copy2(filepath, dest_path)
                 bpm, tone, duration, lufs_approx, size_mb = self.audio.analyze_track(dest_path)
+                
+                artist, album, song = self.project.get_track_metadata(dest_path)
+                if not song: song = original_name
+                
+                thumb_filename = ""
+                art_bytes = self.project.get_track_artwork_bytes(dest_path)
+                if art_bytes:
+                    try:
+                        from PIL import Image, ImageOps
+                        import io
+                        img = Image.open(io.BytesIO(art_bytes)).convert("RGBA")
+                        img = ImageOps.fit(img, (36, 36), Image.Resampling.LANCZOS)
+                        thumb_name = f".thumb_{i}_{int(time.time())}.png"
+                        thumb_dest = os.path.join(self.project.current_folder, thumb_name)
+                        img.save(thumb_dest)
+                        thumb_filename = thumb_name
+                    except Exception as e:
+                        print(f"Thumb error: {e}")
+                        
                 self.project.tracks.append({
-                    'filename': new_filename, 'original_name': original_name, 'bpm': bpm, 'tone': tone, 'duration': duration, 
+                    'filename': new_filename, 'original_name': original_name,
+                    'artist': artist, 'album': album, 'song': song, 'thumb_filename': thumb_filename,
+                    'bpm': bpm, 'tone': tone, 'duration': duration, 
                     'volume': 100.0, 'lufs': lufs_approx, 'size_mb': size_mb, 'is_normalized': normalize_new,
                     'dsp_state': {
                         'master_bypass': True,

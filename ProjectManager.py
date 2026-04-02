@@ -60,6 +60,19 @@ class ProjectState:
         track['bpm'] = round(track['bpm'] * multiplier)
         return track
 
+    def get_track_metadata(self, filepath):
+        try:
+            import mutagen
+            file = mutagen.File(filepath, easy=True)
+            if file:
+                artist = file.get('artist', [''])[0]
+                album = file.get('album', [''])[0]
+                song = file.get('title', [''])[0]
+                return str(artist), str(album), str(song)
+        except Exception:
+            pass
+        return "", "", ""
+
     def get_track_artwork_bytes(self, filepath):
         """Attempts to extract binary ID3 APIC data from an MP3 file."""
         if not filepath.lower().endswith('.mp3'):
@@ -83,6 +96,10 @@ class ProjectState:
             export_metadata.append({
                 "current_file": track['filename'],
                 "original_name": track['original_name'],
+                "artist": track.get('artist', ''),
+                "album": track.get('album', ''),
+                "song": track.get('song', track['original_name']),
+                "thumb_filename": track.get('thumb_filename', ''),
                 "bpm": track['bpm'],
                 "tone": track['tone'],
                 "duration": track['duration'],
