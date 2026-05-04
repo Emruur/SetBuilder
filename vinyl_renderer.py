@@ -1,8 +1,18 @@
 import os
 import io
 import random
+import sys
 from PIL import Image, ImageOps, ImageDraw
 from constants import VINYL_SIZE, CENTER_HOLE
+
+def get_resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        base_path = sys._MEIPASS
+    else:
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
 
 def generate_vinyl_image(artwork_bytes):
     try:
@@ -12,7 +22,7 @@ def generate_vinyl_image(artwork_bytes):
             raise ValueError("No artwork provided")
     except Exception:
         try:
-            default_path = os.path.join(os.getcwd(), "app_states", "default.png")
+            default_path = get_resource_path(os.path.join("assets", "default.png"))
             input_image = Image.open(default_path).convert("RGBA")
         except Exception:
             input_image = Image.new("RGBA", (VINYL_SIZE, VINYL_SIZE), (40, 40, 40, 255))

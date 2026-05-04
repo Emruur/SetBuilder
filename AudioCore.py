@@ -1,13 +1,42 @@
 import os
 import subprocess
+import sys
 import threading
 import tempfile
 import numpy as np
 import sounddevice as sd
 import soundfile as sf
+
+# --- FIX FOR LIBROSA/NUMBA SLOWDOWN IN PYINSTALLER ---
+# Numba needs a writable directory to cache JIT-compiled functions.
+# In a PyInstaller bundle, the default path is read-only, causing recompilation on every call.
+app_name = "SetBuilder"
+if sys.platform == "darwin":
+    cache_dir = os.path.join(os.path.expanduser('~/Library/Application Support'), app_name, "numba_cache")
+elif sys.platform == "win32":
+    cache_dir = os.path.join(os.environ.get('APPDATA', ''), app_name, "numba_cache")
+else:
+    cache_dir = os.path.join(os.path.expanduser('~'), f'.{app_name}', "numba_cache")
+    
+os.makedirs(cache_dir, exist_ok=True)
+os.environ['NUMBA_CACHE_DIR'] = cache_dir
+# -----------------------------------------------------
+
 import librosa
 from pedalboard import Pedalboard, Compressor, HighShelfFilter, LowShelfFilter, PeakFilter, Distortion, Limiter, Gain, load_plugin
 
+def get_ffmpeg_path():
+    """Determines the correct path for the ffmpeg binary, whether bundled or in system PATH."""
+    # The name of the executable
+    ffmpeg_exe = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
+
+    # If running in a PyInstaller bundle
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        bundle_dir = sys._MEIPASS
+        bundled_path = os.path.join(bundle_dir, ffmpeg_exe)
+        if os.path.exists(bundled_path):
+            return bundled_path
+    return ffmpeg_exe # Fallback to system PATH
 class AudioEngine:
     def __init__(self):
         self.is_paused = False
@@ -21,6 +50,8 @@ class AudioEngine:
         self.current_frame = 0
         self.total_frames = 0
         self.channels = 2
+        self.current_rms = 0.0
+        self.current_lufs = -70.0
         
         # Lock to prevent thread collisions between UI and Audio Callback
         self.audio_lock = threading.Lock()
@@ -156,6 +187,22 @@ class AudioEngine:
             # 4. Apply Master UI Volume
             outdata[:frames_read] *= self.volume
 
+            # Calculate real-time RMS and pseudo-LUFS for the UI
+            if frames_read > 0:
+                rms = float(np.sqrt(np.mean(outdata[:frames_read]**2)))
+                # Fast attack, slow release for VU meter ballistics
+                if rms > self.current_rms:
+                    self.current_rms = (0.6 * rms) + (0.4 * self.current_rms)
+                else:
+                    self.current_rms = (0.1 * rms) + (0.9 * self.current_rms)
+                    
+                # Calculate instant LUFS, then heavily smooth it for readable text
+                instant_lufs = float((20 * np.log10(rms)) + 3.0) if rms > 1e-6 else -70.0
+                self.current_lufs = (0.05 * instant_lufs) + (0.95 * self.current_lufs)
+            else:
+                self.current_rms = 0.9 * self.current_rms
+                self.current_lufs = (0.05 * -70.0) + (0.95 * self.current_lufs)
+
     def play(self, filepath, volume=1.0):
         self.play_from(filepath, 0.0, volume)
 
@@ -247,9 +294,17 @@ class AudioEngine:
         if normalize: filters.append(f'loudnorm=I={lufs}:TP=-1.0:LRA=11')
         if volume != 1.0: filters.append(f'volume={volume}')
 
-        cmd = ['ffmpeg', '-y', '-i', str(source_path)]
+        cmd = [get_ffmpeg_path(), '-y', '-i', str(source_path)]
         if filters: cmd.extend(['-af', ','.join(filters)])
-        cmd.extend(['-codec:a', 'libmp3lame', '-q:a', '0', str(dest_path)])
+        cmd.extend([
+            '-map', '0:a:0',
+            '-map', '0:v:0?',
+            '-map_metadata', '0',
+            '-c:v', 'copy',
+            '-codec:a', 'libmp3lame', '-q:a', '0', 
+            '-id3v2_version', '3',
+            str(dest_path)
+        ])
         subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def render_export_track(self, source_path, dest_path, normalize=False, quality_flag="0", lufs=-14.0, volume=1.0):
@@ -307,9 +362,17 @@ class AudioEngine:
             filters = []
             if normalize: filters.append(f'loudnorm=I={lufs}:TP=-1.0:LRA=11')
 
-            cmd = ['ffmpeg', '-y', '-i', str(temp_path)]
+            cmd = [get_ffmpeg_path(), '-y', '-i', str(temp_path), '-i', str(source_path)]
             if filters: cmd.extend(['-af', ','.join(filters)])
-            cmd.extend(['-codec:a', 'libmp3lame', '-q:a', str(quality_flag), str(dest_path)])
+            cmd.extend([
+                '-map', '0:a:0',
+                '-map', '1:v:0?',
+                '-map_metadata', '1',
+                '-c:v', 'copy',
+                '-codec:a', 'libmp3lame', '-q:a', str(quality_flag), 
+                '-id3v2_version', '3',
+                str(dest_path)
+            ])
             
             subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         finally:

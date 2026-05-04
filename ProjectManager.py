@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import sys
 from pathlib import Path
 from mutagen.id3 import ID3, APIC
 
@@ -12,7 +13,14 @@ class ProjectState:
         self.settings = {"normalized": False, "lufs_target": -14.0}
         self.needs_save = False
         
-        self.state_dir = os.path.join(os.getcwd(), "app_states")
+        app_name = "SetBuilder"
+        if sys.platform == "darwin":
+            self.state_dir = os.path.join(os.path.expanduser('~/Library/Application Support'), app_name)
+        elif sys.platform == "win32":
+            self.state_dir = os.path.join(os.environ['APPDATA'], app_name)
+        else:
+            self.state_dir = os.path.join(os.path.expanduser('~'), f'.{app_name}')
+            
         os.makedirs(self.state_dir, exist_ok=True)
         self.state_file = os.path.join(self.state_dir, "last_state.json")
 

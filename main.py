@@ -17,6 +17,17 @@ from export_dialog import ExportDialog
 from vinyl_animator import VinylAnimator
 from project_actions import ProjectActions
 
+def get_resource_path(relative_path):
+    """ Get absolute path to resource, works for dev and for PyInstaller """
+    if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+        # Running in a PyInstaller bundle
+        base_path = sys._MEIPASS
+    else:
+        # Running in a normal Python environment
+        base_path = os.path.abspath(".")
+    return os.path.join(base_path, relative_path)
+
+
 class DJAppUI:
     def __init__(self, root):
         self.root = root
@@ -139,6 +150,9 @@ class DJAppUI:
         
         self.vu_canvas = tk.Canvas(fader_wrapper, width=8, height=VINYL_SIZE-60, bg=BG_LIST, highlightthickness=0)
         self.vu_canvas.pack(side=tk.LEFT, padx=(0, 5))
+        
+        self.lbl_lufs = tk.Label(volume_frame, text="-- LUFS", width=10, bg=BG_MAIN, fg="#aaaaaa", font=("Courier", 8))
+        self.lbl_lufs.pack(pady=(2, 0))
 
         # --- EFFECT RACK (SCROLLABLE) ---
         dsp_container = tk.Frame(left_control_frame, bg=BG_MAIN)
@@ -290,9 +304,8 @@ class DJAppUI:
             else: lim_btn_canvas.create_oval(2, 2, 14, 14, fill=BG_LIST, outline="#888888", width=1.5)
                 
         def toggle_sc_bypass(event):
-            if not self.dsp_vars['limiter_bypass'].get() and not self.dsp_vars['master_bypass'].get():
-                self.dsp_vars['limiter_softclip'].set(not self.dsp_vars['limiter_softclip'].get())
-                self.on_dsp_change()
+            self.dsp_vars['limiter_softclip'].set(not self.dsp_vars['limiter_softclip'].get())
+            self.on_dsp_change()
 
         def draw_sc_btn(*args):
             sc_btn_canvas.delete("all")
@@ -367,7 +380,7 @@ class DJAppUI:
         list_frame.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical")
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        columns = ("num", "bpm", "tone", "artist", "album", "song", "size", "lufs", "norm")
+        columns = ("num", "bpm", "tone", "song", "artist", "album", "size", "norm")
         self.tree = ttk.Treeview(list_frame, columns=columns, show="tree headings", yscrollcommand=scrollbar.set, selectmode="browse", style="Treeview")
         
         self.tree.heading("#0", text="Art")
@@ -380,16 +393,14 @@ class DJAppUI:
         self.tree.column("bpm", width=50, anchor=tk.CENTER, stretch=tk.NO)
         self.tree.heading("tone", text="Key")
         self.tree.column("tone", width=50, anchor=tk.CENTER, stretch=tk.NO)
+        self.tree.heading("song", text="Song")
+        self.tree.column("song", width=160, anchor=tk.W, stretch=tk.YES)
         self.tree.heading("artist", text="Artist")
         self.tree.column("artist", width=120, anchor=tk.W, stretch=tk.YES)
         self.tree.heading("album", text="Album")
         self.tree.column("album", width=120, anchor=tk.W, stretch=tk.YES)
-        self.tree.heading("song", text="Song")
-        self.tree.column("song", width=160, anchor=tk.W, stretch=tk.YES)
         self.tree.heading("size", text="Size")
         self.tree.column("size", width=50, anchor=tk.E, stretch=tk.NO)
-        self.tree.heading("lufs", text="LUFS")
-        self.tree.column("lufs", width=50, anchor=tk.E, stretch=tk.NO)
         self.tree.heading("norm", text="Norm")
         self.tree.column("norm", width=40, anchor=tk.CENTER, stretch=tk.NO)
 
@@ -777,7 +788,49 @@ class DJAppUI:
 
     def on_dsp_change(self, *args):
         if getattr(self, '_loading_dsp', False): return
-        
+
+        # Flag to prevent re-triggering on_dsp_change when programmatically setting bypass
+        if hasattr(self, '_setting_bypass_programmatically') and self._setting_bypass_programmatically:
+            return
+        self._setting_bypass_programmatically = True
+
+        try:
+            # Check for active parameters and unbypass modules
+            # EQ
+            if (self.dsp_vars['eq_low'].get() != 0.0 or
+                self.dsp_vars['eq_mid'].get() != 0.0 or
+                self.dsp_vars['eq_high'].get() != 0.0) and self.dsp_vars['eq_bypass'].get():
+                self.dsp_vars['eq_bypass'].set(False)
+
+            # Dynamics
+            if (self.dsp_vars['dyn_threshold'].get() != 0.0 or
+                self.dsp_vars['dyn_ratio'].get() != 1.0 or
+                self.dsp_vars['dyn_attack'].get() != 5.0 or
+                self.dsp_vars['dyn_release'].get() != 100.0 or
+                self.dsp_vars['dyn_makeup'].get() != 0.0) and self.dsp_vars['dyn_bypass'].get():
+                self.dsp_vars['dyn_bypass'].set(False)
+
+            # Limiter
+            if (self.dsp_vars['limiter_input'].get() != 0.0 or
+                self.dsp_vars['limiter_output'].get() != 0.0 or
+                self.dsp_vars['limiter_softclip'].get()) and self.dsp_vars['limiter_bypass'].get():
+                self.dsp_vars['limiter_bypass'].set(False)
+
+            # If any module is active, ensure master bypass is off
+            # Check all module bypasses, including VSTs
+            any_module_active = (
+                not self.dsp_vars['eq_bypass'].get() or
+                not self.dsp_vars['dyn_bypass'].get() or
+                not self.dsp_vars['limiter_bypass'].get() or
+                any(not v['bypass'].get() for v in self.dsp_vars['vsts'].values())
+            )
+
+            if any_module_active and self.dsp_vars['master_bypass'].get():
+                self.dsp_vars['master_bypass'].set(False)
+
+        finally:
+            self._setting_bypass_programmatically = False
+
         vsts_state = {}
         for k, v in self.dsp_vars.get('vsts', {}).items():
             vsts_state[k] = {
@@ -805,22 +858,24 @@ class DJAppUI:
         if idx is not None:
             self.project.tracks[idx]['dsp_state'] = new_state
             self.project.needs_save = True
-
     # --- UI SUPPORT METHODS ---
     def draw_vu_meter(self):
         self.vu_canvas.delete("all")
         h = VINYL_SIZE - 60
         w = 8
         if not self.audio.is_paused and self.audio.current_track and not self.is_keyboard_scrubbing:
-            bounce = random.uniform(0.4, 1.0)
-            vol_pct = self.volume_var.get()
-            normalized_vol = vol_pct / 100.0 
-            level = bounce * normalized_vol
+            rms = getattr(self.audio, 'current_rms', 0.0)
+            lufs = getattr(self.audio, 'current_lufs', -70.0)
+            
+            level = min(1.0, rms * 2.0)
             fill_height = h * level
             if level > 0.85: color = "#ff4444" 
             elif level > 0.6: color = "#ffaa00" 
             else: color = "#44ff44" 
             self.vu_canvas.create_rectangle(0, h - fill_height, w, h, fill=color, outline="")
+            self.lbl_lufs.config(text=f"{lufs:>5.1f} LUFS")
+        else:
+            self.lbl_lufs.config(text="-- LUFS")
 
     def create_btn(self, parent, text, command, bg_color, width=None, bold=False):
         return create_btn(parent, text, command, bg_color, width, bold)
@@ -845,6 +900,15 @@ class DJAppUI:
             self.tree.selection_set(first_item)
             self.tree.focus(first_item)
             self.tree.see(first_item)
+            self.tree.focus_set()
+            self.tree.event_generate("<<TreeviewSelect>>")
+
+    def select_track_by_index(self, idx):
+        if 0 <= idx < len(self.tree.get_children()):
+            item = self.tree.get_children()[idx]
+            self.tree.selection_set(item)
+            self.tree.focus(item)
+            self.tree.see(item)
             self.tree.focus_set()
             self.tree.event_generate("<<TreeviewSelect>>")
 
@@ -932,9 +996,9 @@ class DJAppUI:
 
         if not row_id: return
 
-        # Allow editing Artist (#4), Album (#5), and Song (#6)
+        # Allow editing Song (#4), Artist (#5), and Album (#6)
         if col_id in ("#4", "#5", "#6"):
-            col_map = {"#4": "artist", "#5": "album", "#6": "song"}
+            col_map = {"#4": "song", "#5": "artist", "#6": "album"}
             data_key = col_map[col_id]
 
             bbox = self.tree.bbox(row_id, col_id)
@@ -1162,7 +1226,7 @@ class DJAppUI:
             
         self.tree_images = {}
         
-        default_art_path = os.path.join(os.getcwd(), "app_states", "default.png")
+        default_art_path = get_resource_path(os.path.join("assets", "default.png"))
         if os.path.exists(default_art_path):
             try:
                 def_img = Image.open(default_art_path).convert("RGBA")
@@ -1177,7 +1241,6 @@ class DJAppUI:
         for i, track in enumerate(self.project.tracks):
             norm_dot = "●" if track.get('is_normalized', False) else "○"
             size_str = f"{track.get('size_mb', 0.0):.1f}"
-            lufs_str = f"{track.get('lufs', -14.0):.1f}"
             
             artist = track.get('artist', '')
             album = track.get('album', '')
@@ -1202,11 +1265,10 @@ class DJAppUI:
                 f"{i + 1}",
                 f"{track['bpm']}", 
                 f"{track['tone']}", 
+                song,
                 artist,
                 album,
-                song,
                 size_str, 
-                lufs_str, 
                 norm_dot
             ))
 
@@ -1316,6 +1378,8 @@ class DJAppUI:
                 self.sync_ui_state()
 
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support() # Fix joblib/multiprocessing spawning issues in PyInstaller
     root = tk.Tk()
     app = DJAppUI(root)
     root.mainloop()

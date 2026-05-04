@@ -117,6 +117,13 @@ class ExportDialog:
             try: self.app.audio.unload()
             except Exception: pass
 
+            original_paths = []
+            temp_file_mappings = []
+
+            if in_place:
+                for track in self.app.project.tracks:
+                    original_paths.append(os.path.join(export_dir, track['filename']))
+
             for i, track in enumerate(self.app.project.tracks):
                 original_name = track.get('original_name', 'track')
                 new_filename = f"{i + 1:02d} - {original_name}"
@@ -138,10 +145,15 @@ class ExportDialog:
                     track_dsp['master_bypass'] = True
                     
                 self.app.audio.dsp_state = track_dsp
-                is_dsp_active = not track_dsp.get('master_bypass', False) and (not track_dsp.get('eq_bypass', False) or not track_dsp.get('dyn_bypass', False) or not track_dsp.get('limiter_bypass', False))
+                is_dsp_active = not track_dsp.get('master_bypass', False) and (
+                    not track_dsp.get('eq_bypass', False) or 
+                    not track_dsp.get('dyn_bypass', False) or 
+                    not track_dsp.get('limiter_bypass', False) or 
+                    any(not v.get('bypass', True) for v in track_dsp.get('vsts', {}).values())
+                )
                 
                 if in_place:
-                    dest_path = os.path.join(export_dir, f"temp_render_{new_filename}")
+                    dest_path = os.path.join(export_dir, f"temp_render_{i}_{new_filename}")
                     final_path = os.path.join(export_dir, new_filename)
                 else:
                     dest_path = os.path.join(export_dir, new_filename)
@@ -153,16 +165,16 @@ class ExportDialog:
                 try:
                     if not needs_render:
                         if in_place:
-                            if source_path != final_path: os.rename(source_path, final_path)
-                        else: shutil.copy2(source_path, final_path)
+                            shutil.copy2(source_path, dest_path)
+                        else:
+                            if source_path != final_path:
+                                shutil.copy2(source_path, final_path)
                     else:
                         self.app.audio.render_export_track(source_path, dest_path, normalize, quality_flag, lufs_target, volume)
-                        if in_place:
-                            if source_path != final_path and os.path.exists(source_path):
-                                try: os.remove(source_path) 
-                                except Exception: pass
-                            os.replace(dest_path, final_path)
-                            
+                        
+                    if in_place:
+                        temp_file_mappings.append((dest_path, final_path))
+
                     track['filename'] = new_filename
                     if not in_place:
                         thumb_filename = track.get('thumb_filename', '')
@@ -175,17 +187,67 @@ class ExportDialog:
                     if normalize:
                         track['is_normalized'] = True
                         track['lufs'] = lufs_target
-                    if bake_dsp and track.get('volume', 100.0) != 100.0:
-                        track['volume'] = 100.0
-                    if is_dsp_active and bake_dsp:
-                        track['dsp_state']['eq_bypass'] = True
-                        track['dsp_state']['dyn_bypass'] = True
-                        track['dsp_state']['limiter_bypass'] = True
-                    if os.path.exists(final_path):
+                    
+                    if bake_dsp:
+                        if track.get('volume', 100.0) != 100.0:
+                            track['volume'] = 100.0
+                        if is_dsp_active:
+                            track['dsp_state']['eq_bypass'] = True
+                            track['dsp_state']['eq_low'] = 0.0
+                            track['dsp_state']['eq_mid'] = 0.0
+                            track['dsp_state']['eq_high'] = 0.0
+                            
+                            track['dsp_state']['dyn_bypass'] = True
+                            track['dsp_state']['dyn_threshold'] = 0.0
+                            track['dsp_state']['dyn_ratio'] = 1.0
+                            track['dsp_state']['dyn_attack'] = 5.0
+                            track['dsp_state']['dyn_release'] = 100.0
+                            track['dsp_state']['dyn_makeup'] = 0.0
+                            
+                            track['dsp_state']['limiter_bypass'] = True
+                            track['dsp_state']['limiter_softclip'] = False
+                            track['dsp_state']['limiter_input'] = 0.0
+                            track['dsp_state']['limiter_output'] = 0.0
+                            
+                            if 'vsts' in track['dsp_state']:
+                                for vst in track['dsp_state']['vsts'].values():
+                                    vst['bypass'] = True
+                                    
+                            track['dsp_state']['master_bypass'] = True
+
+                    if not in_place and os.path.exists(final_path):
                         track['size_mb'] = float(os.path.getsize(final_path) / (1024 * 1024))
                         
-                except Exception as e: print(f"Render Error on {track.get('filename')}: {e}")
+                except Exception as e: 
+                    print(f"Render Error on {track.get('filename')}: {e}")
+                    if in_place and os.path.exists(dest_path):
+                        try: os.remove(dest_path)
+                        except: pass
+                        
                 self.app.root.after(0, self.render_progress_var.set, ((i + 1) / total) * 100)
+
+            if in_place:
+                self.app.root.after(0, self.lbl_render_status.config, {"text": "Finalizing files..."})
+                
+                expected_final_paths = {fp for _, fp in temp_file_mappings}
+                
+                for temp_path, final_path in temp_file_mappings:
+                    if os.path.exists(temp_path):
+                        try: os.replace(temp_path, final_path)
+                        except Exception as e: print(f"Replace error: {e}")
+                        
+                active_filenames = {t.get('filename') for t in self.app.project.tracks}
+                for old_path in set(original_paths):
+                    old_filename = os.path.basename(old_path)
+                    if old_filename not in active_filenames and old_path not in expected_final_paths:
+                        if os.path.exists(old_path):
+                            try: os.remove(old_path)
+                            except Exception as e: print(f"Cleanup error: {e}")
+                        
+                for track in self.app.project.tracks:
+                    final_path = os.path.join(export_dir, track['filename'])
+                    if os.path.exists(final_path):
+                        track['size_mb'] = float(os.path.getsize(final_path) / (1024 * 1024))
 
             if not in_place: self.app.project.current_folder = export_dir
             self.app.project.is_saved_set = True

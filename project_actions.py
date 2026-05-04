@@ -210,6 +210,7 @@ class ProjectActions:
 
     def add_tracks_worker(self, filepaths, normalize_new, was_sorted, select_first_at_end=False):
         total, lufs_target = len(filepaths), self.project.settings.get("lufs_target", -14.0)
+        new_filenames = []
         for i, filepath in enumerate(filepaths):
             path_obj, ext = Path(filepath), Path(filepath).suffix.lower()
             original_name = self.project.clean_name(path_obj.name) 
@@ -253,6 +254,7 @@ class ProjectActions:
                         'vsts': {}
                     }
                 })
+                new_filenames.append(new_filename)
             except Exception as e: print(f"Error adding track: {e}")
             self.root.after(0, self.app.progress_var.set, ((i + 1) / total) * 100)
 
@@ -266,5 +268,9 @@ class ProjectActions:
             self.project.needs_save = True
             if select_first_at_end:
                 self.app.select_first_track()
+            elif new_filenames:
+                added_indices = [idx for idx, t in enumerate(self.project.tracks) if t['filename'] in new_filenames]
+                if added_indices:
+                    self.app.select_track_by_index(min(added_indices))
 
         self.root.after(0, on_done)

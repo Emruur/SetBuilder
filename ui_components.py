@@ -42,12 +42,10 @@ class Knob(tk.Canvas):
         self.draw()
 
     def on_press(self, event):
-        if self.disabled: return
         self.start_y = event.y
         self.start_val = self.variable.get()
 
     def on_drag(self, event):
-        if self.disabled: return
         dy = self.start_y - event.y
         new_val = self.start_val + (dy / 100.0) * (self.to_ - self.from_) # 100px vertical drag = full range
         new_val = max(self.from_, min(self.to_, new_val))
