@@ -10,3 +10,4 @@
 /app_states
 *.pyc
 /venv
+/assets/ffmpeg
