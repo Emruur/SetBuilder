@@ -5,3 +5,8 @@
 /SortedSet.zip
 /SortedSet_export.zip
 /__pycache__
+/build
+/dist
+/app_states
+*.pyc
+/venv

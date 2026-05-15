@@ -1,5 +1,6 @@
 import os
 import sys
+import copy
 import threading
 import time
 import datetime
@@ -24,7 +25,8 @@ def get_resource_path(relative_path):
         base_path = sys._MEIPASS
     else:
         # Running in a normal Python environment
-        base_path = os.path.abspath(".")
+        # Go up from src/ to the project root where assets/ lives
+        base_path = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     return os.path.join(base_path, relative_path)
 
 
@@ -44,6 +46,8 @@ class DJAppUI:
         self.seek_offset = 0
         self.is_dragging_slider = False
         self.update_job = None
+        self._undo_stack = []
+        self._redo_stack = []
         
         self.is_keyboard_scrubbing = False
         self.scrub_speed = 1.0
@@ -221,8 +225,12 @@ class DJAppUI:
         tk.Label(rack_header, text="Power", bg=BG_LIST, fg=FG_TEXT, font=("Helvetica", 8)).pack(side=tk.RIGHT)
         
         def toggle_master(*args):
-            self.dsp_vars['master_bypass'].set(not self.dsp_vars['master_bypass'].get())
-            self.on_dsp_change()
+            self._master_user_toggled = True
+            try:
+                self.dsp_vars['master_bypass'].set(not self.dsp_vars['master_bypass'].get())
+                self.on_dsp_change()
+            finally:
+                self._master_user_toggled = False
 
         def draw_master(*args):
             master_btn_canvas.delete("all")
@@ -293,8 +301,12 @@ class DJAppUI:
                 val_lbl.config(fg=color)
         
         def toggle_lim_bypass(event):
-            self.dsp_vars['limiter_bypass'].set(not self.dsp_vars['limiter_bypass'].get())
-            self.on_dsp_change()
+            self._user_toggling_bypass = True
+            try:
+                self.dsp_vars['limiter_bypass'].set(not self.dsp_vars['limiter_bypass'].get())
+                self.on_dsp_change()
+            finally:
+                self._user_toggling_bypass = False
             
         def draw_lim_btn(*args):
             lim_btn_canvas.delete("all")
@@ -431,6 +443,16 @@ class DJAppUI:
         self.create_btn(math_group, "÷2", lambda: self.modify_bpm(0.5), BTN_NORMAL, 4).pack(pady=2)
         self.create_btn(math_group, "↻ Sort", self.resort_project, "#a86a11", 6).pack(pady=(10, 5), padx=5)
 
+        history_group = tk.Frame(right_inner, bg=BG_MAIN, highlightbackground=BORDER, highlightthickness=1)
+        history_group.pack(pady=(0, 10), padx=5, fill=tk.X)
+        tk.Label(history_group, text="History", bg=BG_MAIN, fg=FG_TEXT, font=("Helvetica", 9, "bold")).pack(pady=(5, 2))
+        self.btn_undo = self.create_btn(history_group, "↩ Undo", self.undo, BTN_NORMAL, 6)
+        self.btn_undo.pack(pady=2)
+        self.btn_undo.config(state=tk.DISABLED)
+        self.btn_redo = self.create_btn(history_group, "↪ Redo", self.redo, BTN_NORMAL, 6)
+        self.btn_redo.pack(pady=(2, 5))
+        self.btn_redo.config(state=tk.DISABLED)
+
         move_group = tk.Frame(right_inner, bg=BG_MAIN, highlightbackground=BORDER, highlightthickness=1)
         move_group.pack(pady=5, padx=5, fill=tk.X)
         tk.Label(move_group, text="Move", bg=BG_MAIN, fg=FG_TEXT, font=("Helvetica", 9, "bold")).pack(pady=(5,2))
@@ -455,8 +477,20 @@ class DJAppUI:
 
         audio_frame = tk.Frame(self.root, bg=BG_MAIN)
         audio_frame.pack(fill=tk.X, padx=20, pady=(0, 15))
-        left_spacer = tk.Frame(audio_frame, bg=BG_MAIN)
-        left_spacer.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
+        info_frame = tk.Frame(audio_frame, bg=BG_MAIN)
+        info_frame.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
+
+        total_box = tk.Frame(info_frame, bg=BG_LIST, highlightbackground=BORDER, highlightthickness=1)
+        total_box.pack(side=tk.LEFT, padx=(0, 6))
+        tk.Label(total_box, text="TOTAL SET", bg=BG_LIST, fg=FG_TEXT, font=("Helvetica", 7, "bold")).pack(padx=8, pady=(3, 0))
+        self.lbl_set_total = tk.Label(total_box, text="--:--", bg=BG_LIST, fg=HIGHLIGHT, font=("Courier", 11, "bold"))
+        self.lbl_set_total.pack(padx=8, pady=(0, 3))
+
+        upto_box = tk.Frame(info_frame, bg=BG_LIST, highlightbackground=BORDER, highlightthickness=1)
+        upto_box.pack(side=tk.LEFT)
+        tk.Label(upto_box, text="UP TO HERE", bg=BG_LIST, fg=FG_TEXT, font=("Helvetica", 7, "bold")).pack(padx=8, pady=(3, 0))
+        self.lbl_set_upto = tk.Label(upto_box, text="--:--", bg=BG_LIST, fg=HIGHLIGHT, font=("Courier", 11, "bold"))
+        self.lbl_set_upto.pack(padx=8, pady=(0, 3))
         
         transport_group = self.create_group_frame(audio_frame, padx=0, pady=0)
         transport_group.pack(side=tk.LEFT)
@@ -673,9 +707,13 @@ class DJAppUI:
         del_btn.bind("<Button-1>", delete_vst)
         
         def toggle_bypass(e):
-            bypass_var.set(not bypass_var.get())
-            self.on_dsp_change()
-            
+            self._user_toggling_bypass = True
+            try:
+                bypass_var.set(not bypass_var.get())
+                self.on_dsp_change()
+            finally:
+                self._user_toggling_bypass = False
+
         draw_btn_cb = None
         def draw_btn(*args):
             try:
@@ -760,9 +798,13 @@ class DJAppUI:
         btn_canvas.pack(side=tk.RIGHT, padx=8, pady=4)
         
         def toggle_bypass(event):
-            bypass_var.set(not bypass_var.get())
-            self.on_dsp_change()
-            
+            self._user_toggling_bypass = True
+            try:
+                bypass_var.set(not bypass_var.get())
+                self.on_dsp_change()
+            finally:
+                self._user_toggling_bypass = False
+
         def draw_btn(*args):
             try:
                 if not btn_canvas.winfo_exists(): return
@@ -795,26 +837,27 @@ class DJAppUI:
         self._setting_bypass_programmatically = True
 
         try:
-            # Check for active parameters and unbypass modules
-            # EQ
-            if (self.dsp_vars['eq_low'].get() != 0.0 or
-                self.dsp_vars['eq_mid'].get() != 0.0 or
-                self.dsp_vars['eq_high'].get() != 0.0) and self.dsp_vars['eq_bypass'].get():
-                self.dsp_vars['eq_bypass'].set(False)
+            # Only auto-unbypass modules on parameter value changes, not on explicit bypass toggles
+            if not getattr(self, '_user_toggling_bypass', False):
+                # EQ
+                if (self.dsp_vars['eq_low'].get() != 0.0 or
+                    self.dsp_vars['eq_mid'].get() != 0.0 or
+                    self.dsp_vars['eq_high'].get() != 0.0) and self.dsp_vars['eq_bypass'].get():
+                    self.dsp_vars['eq_bypass'].set(False)
 
-            # Dynamics
-            if (self.dsp_vars['dyn_threshold'].get() != 0.0 or
-                self.dsp_vars['dyn_ratio'].get() != 1.0 or
-                self.dsp_vars['dyn_attack'].get() != 5.0 or
-                self.dsp_vars['dyn_release'].get() != 100.0 or
-                self.dsp_vars['dyn_makeup'].get() != 0.0) and self.dsp_vars['dyn_bypass'].get():
-                self.dsp_vars['dyn_bypass'].set(False)
+                # Dynamics
+                if (self.dsp_vars['dyn_threshold'].get() != 0.0 or
+                    self.dsp_vars['dyn_ratio'].get() != 1.0 or
+                    self.dsp_vars['dyn_attack'].get() != 5.0 or
+                    self.dsp_vars['dyn_release'].get() != 100.0 or
+                    self.dsp_vars['dyn_makeup'].get() != 0.0) and self.dsp_vars['dyn_bypass'].get():
+                    self.dsp_vars['dyn_bypass'].set(False)
 
-            # Limiter
-            if (self.dsp_vars['limiter_input'].get() != 0.0 or
-                self.dsp_vars['limiter_output'].get() != 0.0 or
-                self.dsp_vars['limiter_softclip'].get()) and self.dsp_vars['limiter_bypass'].get():
-                self.dsp_vars['limiter_bypass'].set(False)
+                # Limiter
+                if (self.dsp_vars['limiter_input'].get() != 0.0 or
+                    self.dsp_vars['limiter_output'].get() != 0.0 or
+                    self.dsp_vars['limiter_softclip'].get()) and self.dsp_vars['limiter_bypass'].get():
+                    self.dsp_vars['limiter_bypass'].set(False)
 
             # If any module is active, ensure master bypass is off
             # Check all module bypasses, including VSTs
@@ -825,7 +868,7 @@ class DJAppUI:
                 any(not v['bypass'].get() for v in self.dsp_vars['vsts'].values())
             )
 
-            if any_module_active and self.dsp_vars['master_bypass'].get():
+            if any_module_active and self.dsp_vars['master_bypass'].get() and not getattr(self, '_master_user_toggled', False):
                 self.dsp_vars['master_bypass'].set(False)
 
         finally:
@@ -989,6 +1032,7 @@ class DJAppUI:
             self.vinyl_animator.update_artwork(track['filename'])
         else:
             self.vinyl_animator.update_artwork(None)
+        self.update_set_length_labels()
 
     def on_double_click(self, event):
         row_id = self.tree.identify_row(event.y)
@@ -1057,6 +1101,10 @@ class DJAppUI:
             self.tree.bind(key, self.on_arrow_override)
         self.root.bind("<space>", self.on_space_override)
         self.tree.bind("<space>", self.on_space_override)
+        self.root.bind("<Command-z>", lambda e: self.undo())
+        self.root.bind("<Command-Z>", lambda e: self.redo())
+        self.root.bind("<Control-z>", lambda e: self.undo())
+        self.root.bind("<Control-y>", lambda e: self.redo())
 
     # --- RESTORED: Transport logic ---
     def on_arrow_override(self, event):
@@ -1154,6 +1202,7 @@ class DJAppUI:
     def shift_track(self, offset):
         idx = self.get_selected_idx()
         if idx is not None:
+            self.push_undo()
             new_idx = self.project.shift_track(idx, offset)
             if idx != new_idx:
                 self.refresh_tree()
@@ -1207,6 +1256,7 @@ class DJAppUI:
     def modify_bpm(self, multiplier):
         idx = self.get_selected_idx()
         if idx is not None:
+            self.push_undo()
             self.project.modify_bpm(idx, multiplier)
             self.refresh_tree()
             item = self.tree.get_children()[idx]
@@ -1215,10 +1265,49 @@ class DJAppUI:
 
     def resort_project(self):
         if not self.project.tracks: return
-        if messagebox.askyesno("Re-Sort", "Reorganize list by BPM?"):
-            self.project.resort_by_bpm()
-            self.refresh_tree()
-            self.project.needs_save = True
+        self.push_undo()
+        self.project.resort_by_bpm()
+        self.refresh_tree()
+        self.project.needs_save = True
+
+    def push_undo(self):
+        self._undo_stack.append(copy.deepcopy(self.project.tracks))
+        self._redo_stack.clear()
+        self._update_history_buttons()
+
+    def undo(self):
+        if not self._undo_stack: return
+        self._redo_stack.append(copy.deepcopy(self.project.tracks))
+        self.project.tracks = self._undo_stack.pop()
+        self.project.needs_save = True
+        self.refresh_tree()
+        self._update_history_buttons()
+
+    def redo(self):
+        if not self._redo_stack: return
+        self._undo_stack.append(copy.deepcopy(self.project.tracks))
+        self.project.tracks = self._redo_stack.pop()
+        self.project.needs_save = True
+        self.refresh_tree()
+        self._update_history_buttons()
+
+    def _update_history_buttons(self):
+        self.btn_undo.config(state=tk.NORMAL if self._undo_stack else tk.DISABLED)
+        self.btn_redo.config(state=tk.NORMAL if self._redo_stack else tk.DISABLED)
+
+    def update_set_length_labels(self):
+        if not self.project.tracks:
+            self.lbl_set_total.config(text="--:--")
+            self.lbl_set_upto.config(text="--:--")
+            return
+        total = sum(t.get('duration', 0) for t in self.project.tracks)
+        self.lbl_set_total.config(text=self.format_time(total))
+        idx = self.get_active_idx()
+        if idx is not None:
+            upto = sum(t.get('duration', 0) for t in self.project.tracks[:idx + 1])
+            self.lbl_set_upto.config(text=self.format_time(upto))
+        else:
+            self.lbl_set_upto.config(text="--:--")
 
     def refresh_tree(self):
         for item in self.tree.get_children():
@@ -1268,9 +1357,10 @@ class DJAppUI:
                 song,
                 artist,
                 album,
-                size_str, 
+                size_str,
                 norm_dot
             ))
+        self.update_set_length_labels()
 
     def toggle_play_pause(self):
         try:

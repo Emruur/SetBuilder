@@ -1,0 +1,388 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SetBuilder — DJ Set Builder Pro</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Aldrich&display=swap" rel="stylesheet">
+
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:         #1e1e1e;
+      --surface:    #2b2b2b;
+      --surface2:   #3a3a3a;
+      --border:     #444444;
+      --accent:     #DC9230;
+      --accent-dim: rgba(220,146,48,.12);
+      --accent-mid: rgba(220,146,48,.35);
+      --accent-glow:rgba(220,146,48,.25);
+      --text:       #eeeeee;
+      --muted:      #999999;
+      --radius:     10px;
+    }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Aldrich', sans-serif;
+      font-size: 16px;
+      line-height: 1.65;
+    }
+
+    /* ── Site header ── */
+    .site-header {
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 1rem;
+      padding: 2.5rem 1.5rem 2rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .site-header img {
+      width: 52px;
+      height: 52px;
+      border-radius: 11px;
+      box-shadow: 0 4px 16px rgba(0,0,0,.5);
+      flex-shrink: 0;
+    }
+
+    .site-title {
+      font-family: 'Aldrich', sans-serif;
+      font-weight: 400;
+      font-size: 1.5rem;
+      letter-spacing: .08em;
+      color: var(--accent);
+      text-shadow: 0 0 18px rgba(220,146,48,.35);
+      line-height: 1;
+    }
+
+    /* ── Buttons ── */
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: .5rem;
+      padding: .65rem 1.35rem;
+      border-radius: var(--radius);
+      font-size: .9rem;
+      font-weight: 600;
+      text-decoration: none;
+      transition: opacity .2s, transform .15s;
+      cursor: pointer;
+      border: none;
+    }
+    .btn:hover { opacity: .85; transform: translateY(-1px); }
+    .btn-primary { background: var(--accent); color: #1e1e1e; }
+    .btn-ghost {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+    .btn-ghost:hover { border-color: var(--accent); color: var(--accent); opacity: 1; }
+
+    /* ── Sections ── */
+    section {
+      padding: clamp(4rem, 8vw, 7rem) clamp(1.5rem, 5vw, 4rem);
+      max-width: 1140px;
+      margin: 0 auto;
+    }
+
+    .divider {
+      border: none;
+      border-top: 1px solid var(--border);
+      margin: 0 clamp(1.5rem, 5vw, 4rem);
+    }
+
+    /* ── Hero (Section 1) ── */
+    .hero {
+      display: flex;
+      align-items: center;
+      gap: clamp(2rem, 5vw, 5rem);
+    }
+
+    .hero-text { flex: 1 1 360px; }
+
+    .badge {
+      display: inline-block;
+      padding: .3rem .75rem;
+      border-radius: 99px;
+      font-size: .75rem;
+      font-weight: 600;
+      letter-spacing: .06em;
+      text-transform: uppercase;
+      background: var(--accent-dim);
+      color: var(--accent);
+      border: 1px solid var(--accent-mid);
+      margin-bottom: 1.25rem;
+    }
+
+    h1 {
+      font-size: clamp(2.2rem, 5vw, 3.4rem);
+      font-weight: 400;
+      letter-spacing: -.02em;
+      line-height: 1.15;
+      margin-bottom: 1.1rem;
+    }
+
+    h1 span { color: var(--accent); }
+
+    .hero-desc {
+      color: var(--muted);
+      font-size: 1.05rem;
+      margin-bottom: 2rem;
+      max-width: 460px;
+    }
+
+    .hero-actions { display: flex; gap: 1rem; flex-wrap: wrap; }
+
+    .hero-media {
+      flex: 1 1 400px;
+      border-radius: var(--radius);
+      overflow: hidden;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      box-shadow: 0 24px 80px rgba(0,0,0,.5);
+    }
+
+    .hero-media img {
+      width: 100%;
+      display: block;
+      border-radius: var(--radius);
+    }
+
+    /* ── Feature sections ── */
+    .feature {
+      display: flex;
+      align-items: center;
+      gap: clamp(2rem, 5vw, 5rem);
+    }
+
+    .feature.reverse { flex-direction: row-reverse; }
+    .feature-text { flex: 1 1 340px; }
+
+    .feature-tag {
+      display: inline-block;
+      font-size: .75rem;
+      font-weight: 700;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+      color: var(--accent);
+      margin-bottom: .75rem;
+    }
+
+    h2 {
+      font-size: clamp(1.6rem, 3.5vw, 2.4rem);
+      font-weight: 400;
+      letter-spacing: -.02em;
+      line-height: 1.2;
+      margin-bottom: 1rem;
+    }
+
+    .feature-desc {
+      color: var(--muted);
+      font-size: 1rem;
+      margin-bottom: 1.5rem;
+    }
+
+    .feature-list {
+      list-style: none;
+      display: flex;
+      flex-direction: column;
+      gap: .6rem;
+    }
+
+    .feature-list li {
+      display: flex;
+      align-items: flex-start;
+      gap: .6rem;
+      font-size: .95rem;
+      color: var(--muted);
+    }
+
+    .feature-list li::before {
+      content: "▸";
+      color: var(--accent);
+      flex-shrink: 0;
+      margin-top: .05em;
+    }
+
+    .feature-media {
+      flex: 1 1 440px;
+      border-radius: var(--radius);
+      overflow: hidden;
+      border: 1px solid var(--border);
+      background: var(--surface);
+      box-shadow: 0 16px 60px rgba(0,0,0,.45);
+    }
+
+    .feature-media img {
+      width: 100%;
+      display: block;
+    }
+
+    .media-placeholder {
+      width: 100%;
+      aspect-ratio: 16/10;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: .5rem;
+      background: var(--surface);
+      color: var(--border);
+      font-size: .85rem;
+    }
+
+    .media-placeholder svg { opacity: .35; }
+
+    /* ── Footer ── */
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 2.5rem clamp(1.5rem, 5vw, 4rem);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+      gap: 1rem;
+      color: var(--muted);
+      font-size: .85rem;
+    }
+
+    footer a { color: var(--muted); text-decoration: none; }
+    footer a:hover { color: var(--accent); }
+
+    /* ── Responsive ── */
+    @media (max-width: 720px) {
+      .hero, .feature, .feature.reverse { flex-direction: column; }
+    }
+  </style>
+</head>
+<body>
+
+<!-- Site header: logo + name centered -->
+<header class="site-header">
+  <img src="assets/logo.png" alt="SetBuilder logo" />
+  <span class="site-title">SETBUILDER</span>
+</header>
+
+<!-- ── Section 1 · Hero ── -->
+<section id="hero">
+  <div class="hero">
+    <div class="hero-text">
+      <div class="badge">Open Source · Free</div>
+      <h1>Build DJ sets<br /><span>with precision.</span></h1>
+      <p class="hero-desc">
+        Prepare your sets in advance. 
+        Load your tracks, lock in the order, shape each track with a full DSP chain,
+        and render a numbered, mix-ready export — all from a single window.
+      </p>
+      <div class="hero-actions">
+        <a class="btn btn-primary" href="https://github.com/Emruur/SetBuilder/releases" target="_blank" rel="noopener">
+          ↓ Download
+        </a>
+        <a class="btn btn-ghost" href="https://github.com/Emruur/SetBuilder" target="_blank" rel="noopener">
+          View on GitHub
+        </a>
+      </div>
+    </div>
+
+    <div class="hero-media">
+      <img
+        src="website_assets/overview.gif"
+        alt="SetBuilder app overview"
+        onerror="this.parentElement.innerHTML=placeholderHTML('App overview')"
+      />
+    </div>
+  </div>
+</section>
+
+<hr class="divider" />
+
+<!-- ── Section 2 · Sorting & DJ Preview ── -->
+<section id="sorting">
+  <div class="feature">
+    <div class="feature-media">
+      <img
+        src="website_assets/sorting.gif"
+        alt="Sorting and DJ preview demo"
+        onerror="this.parentElement.innerHTML=placeholderHTML('Sorting demo')"
+      />
+    </div>
+
+    <div class="feature-text">
+      <span class="feature-tag">Arrange</span>
+      <h2>Order your set,<br />hear it in context.</h2>
+      <p class="feature-desc">
+        Sort tracks automatically by BPM and drag them into any order you like.
+      </p>
+      <ul class="feature-list">
+        <li>BPM-aware auto-sort for smooth energy curves</li>
+        <li>Manual reordering</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<hr class="divider" />
+
+<!-- ── Section 3 · DSP & Normalization ── -->
+<section id="dsp">
+  <div class="feature reverse">
+    <div class="feature-media">
+      <img
+        src="website_assets/dsp.gif"
+        alt="DSP chain and LUFS normalization demo"
+        onerror="this.parentElement.innerHTML=placeholderHTML('DSP demo')"
+      />
+    </div>
+
+    <div class="feature-text">
+      <span class="feature-tag">DSP</span>
+      <h2>Per-track DSP<br />and auto loudness.</h2>
+      <p class="feature-desc">
+        Every track gets its own independent processing chain. Dial in EQ, compression, and limiting track by
+        track — then normalize loudness across set.
+      </p>
+      <ul class="feature-list">
+        <li>3-band EQ per track — Compressor - Limiter</li>
+        <li>Auto LUFS normalization across the entire set</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<hr class="divider" />
+
+
+<!-- Footer -->
+<footer>
+  <span>SetBuilder — open source DJ set builder</span>
+  <span>
+    <a href="https://github.com/Emruur/SetBuilder" target="_blank" rel="noopener">GitHub</a>
+    &nbsp;·&nbsp;
+    <a href="https://github.com/Emruur/SetBuilder/releases" target="_blank" rel="noopener">Releases</a>
+    &nbsp;·&nbsp;
+    <a href="https://github.com/Emruur/SetBuilder/issues" target="_blank" rel="noopener">Issues</a>
+  </span>
+</footer>
+
+<script>
+  function placeholderHTML(label) {
+    return `<div class="media-placeholder">
+      <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+        <rect x="2" y="4" width="20" height="16" rx="2"/>
+        <path d="m10 9 5 3-5 3V9z"/>
+      </svg>
+      <span>${label} — add GIF to website_assets/</span>
+    </div>`;
+  }
+</script>
+
+</body>
+</html>

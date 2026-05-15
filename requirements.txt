@@ -1,0 +1,7 @@
+Pillow
+librosa
+soundfile
+sounddevice
+pedalboard
+mutagen
+pyinstaller

@@ -6,8 +6,8 @@
 block_cipher = None
 
 # Analysis: This is where PyInstaller finds all your code and dependencies.
-a = Analysis(['main.py'],
-             pathex=['/Users/emreuguremruur/Documents/Dev/SetBuilder'],
+a = Analysis(['src/main.py'],
+             pathex=['src'],
              binaries=[],
              # Add all your data files here.
              # The first part is the source file in your project.
