@@ -48,20 +48,49 @@ class ProjectState:
         return ""
 
     def shift_track(self, idx, offset):
+        if not self.tracks: return idx
         new_idx = max(0, min(len(self.tracks) - 1, idx + offset))
         if idx == new_idx: return new_idx
+        target_inactive = self.tracks[new_idx].get('inactive', False)
         track = self.tracks.pop(idx)
+        track['inactive'] = target_inactive
         self.tracks.insert(new_idx, track)
         return new_idx
 
+    def toggle_inactive(self, idx):
+        if idx < 0 or idx >= len(self.tracks): return idx
+        track = self.tracks.pop(idx)
+        new_inactive = not track.get('inactive', False)
+        track['inactive'] = new_inactive
+        if new_inactive:
+            self.tracks.append(track)
+            return len(self.tracks) - 1
+        # Restoring: drop just above the first inactive track (bottom of active section)
+        first_inactive = next((i for i, t in enumerate(self.tracks) if t.get('inactive', False)), len(self.tracks))
+        self.tracks.insert(first_inactive, track)
+        return first_inactive
+
     def resort_by_bpm(self):
-        self.tracks.sort(key=lambda x: x['bpm'])
+        actives = [t for t in self.tracks if not t.get('inactive', False)]
+        inactives = [t for t in self.tracks if t.get('inactive', False)]
+        actives.sort(key=lambda x: x['bpm'])
+        inactives.sort(key=lambda x: x['bpm'])
+        self.tracks = actives + inactives
 
     def is_bpm_sorted(self):
-        """Checks if the current tracklist is still perfectly sorted by BPM"""
+        """Checks if the current tracklist is still perfectly sorted by BPM (actives first, then inactives)"""
         if len(self.tracks) <= 1:
             return True
-        return all(self.tracks[i]['bpm'] <= self.tracks[i+1]['bpm'] for i in range(len(self.tracks)-1))
+        seen_inactive = False
+        for t in self.tracks:
+            if t.get('inactive', False):
+                seen_inactive = True
+            elif seen_inactive:
+                return False
+        actives = [t for t in self.tracks if not t.get('inactive', False)]
+        inactives = [t for t in self.tracks if t.get('inactive', False)]
+        return (all(actives[i]['bpm'] <= actives[i+1]['bpm'] for i in range(len(actives)-1))
+                and all(inactives[i]['bpm'] <= inactives[i+1]['bpm'] for i in range(len(inactives)-1)))
 
     def modify_bpm(self, idx, multiplier):
         track = self.tracks[idx]
@@ -115,6 +144,7 @@ class ProjectState:
                 "lufs": track.get('lufs', -14.0),
                 "size_mb": track.get('size_mb', 0.0),
                 "is_normalized": track.get('is_normalized', False),
+                "inactive": track.get('inactive', False),
                 "dsp_state": track.get('dsp_state', {
                     'master_bypass': True,
                     'chain_order': ['eq', 'dyn'],

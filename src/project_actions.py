@@ -115,6 +115,7 @@ class ProjectActions:
                     "duration": float(t.get("duration", 0.0)), "volume": float(t.get("volume", 100.0)),
                     "lufs": float(t.get("lufs", -14.0)), "size_mb": float(t.get("size_mb", 0.0)),
                     "is_normalized": t.get("is_normalized", self.project.settings.get("normalized", False)),
+                    "inactive": bool(t.get("inactive", False)),
                     "dsp_state": t.get("dsp_state", {
                         'master_bypass': True,
                         'chain_order': ['eq', 'dyn'],
@@ -240,10 +241,11 @@ class ProjectActions:
                     except Exception as e:
                         print(f"Thumb error: {e}")
                         
-                self.project.tracks.append({
+                insert_idx = next((j for j, tt in enumerate(self.project.tracks) if tt.get('inactive', False)), len(self.project.tracks))
+                self.project.tracks.insert(insert_idx, {
                     'filename': new_filename, 'original_name': original_name,
                     'artist': artist, 'album': album, 'song': song, 'thumb_filename': thumb_filename,
-                    'bpm': bpm, 'tone': tone, 'duration': duration, 
+                    'bpm': bpm, 'tone': tone, 'duration': duration,
                     'volume': 100.0, 'lufs': lufs_approx, 'size_mb': size_mb, 'is_normalized': normalize_new,
                     'dsp_state': {
                         'master_bypass': True,

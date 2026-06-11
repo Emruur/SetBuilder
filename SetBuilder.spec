@@ -3,7 +3,12 @@
 # This is a PyInstaller spec file. It's a Python script that tells PyInstaller
 # how to build your application.
 
+import os as _os
 block_cipher = None
+
+_datas = [('assets/default.png', 'assets')]
+if _os.path.exists('assets/ffmpeg'):
+    _datas.append(('assets/ffmpeg', '.'))
 
 # Analysis: This is where PyInstaller finds all your code and dependencies.
 a = Analysis(['src/main.py'],
@@ -12,10 +17,7 @@ a = Analysis(['src/main.py'],
              # Add all your data files here.
              # The first part is the source file in your project.
              # The second part is the destination folder inside the .app bundle.
-             datas=[
-                 ('assets/default.png', 'assets'),
-                 ('assets/ffmpeg', '.'),
-             ],
+             datas=_datas,
              # Sometimes PyInstaller misses imports for complex libraries.
              # We can tell it about them here.
              hiddenimports=[
@@ -29,6 +31,7 @@ a = Analysis(['src/main.py'],
                  'tkinter.filedialog',
                  'tkinter.messagebox',
                  'tkinter.simpledialog',
+                 'tkinterdnd2',
                  'soundfile_build' # Often needed for soundfile
              ],
              hookspath=[],

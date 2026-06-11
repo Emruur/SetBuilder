@@ -8,9 +8,17 @@ import random
 import tkinter as tk
 from tkinter import messagebox, ttk, filedialog
 
+try:
+    from tkinterdnd2 import DND_FILES, TkinterDnD
+    _HAS_DND = True
+except ImportError:
+    DND_FILES = None
+    TkinterDnD = None
+    _HAS_DND = False
+
 from AudioCore import AudioEngine
 from ProjectManager import ProjectState
-from PIL import Image, ImageTk, ImageOps
+from PIL import Image, ImageTk, ImageOps, ImageEnhance
 
 from constants import BG_MAIN, BG_LIST, FG_TEXT, BTN_NORMAL, BTN_HOVER, HIGHLIGHT, BORDER, VINYL_SIZE, CENTER_HOLE
 from ui_components import create_btn, create_group_frame, Knob, Timeline
@@ -48,6 +56,12 @@ class DJAppUI:
         self.update_job = None
         self._undo_stack = []
         self._redo_stack = []
+
+        self._drag_src_idx = None
+        self._drag_y_start = 0
+        self._drag_active = False
+        self._drop_indicator = None
+        self._drop_intended_idx = None
         
         self.is_keyboard_scrubbing = False
         self.scrub_speed = 1.0
@@ -56,7 +70,8 @@ class DJAppUI:
 
         self.setup_ui()
         self.bind_shortcuts()
-        self.root.after(100, self.auto_load_last_session) 
+        self._setup_file_drop()
+        self.root.after(100, self.auto_load_last_session)
         
         threading.Thread(target=self.autosave_daemon, daemon=True).start()
 
@@ -390,6 +405,7 @@ class DJAppUI:
         # --- CENTER PANEL ---
         list_frame = tk.Frame(mid_frame, bg=BG_MAIN, highlightbackground=BORDER, highlightthickness=1)
         list_frame.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
+        self.list_frame = list_frame
         scrollbar = ttk.Scrollbar(list_frame, orient="vertical")
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         columns = ("num", "bpm", "tone", "song", "artist", "album", "size", "norm")
@@ -418,7 +434,9 @@ class DJAppUI:
 
         self.tree.pack(side=tk.LEFT, expand=True, fill=tk.BOTH)
         scrollbar.config(command=self.tree.yview)
-        
+
+        self.tree.tag_configure("inactive", foreground="#454545", font=("Courier", 11, "italic"))
+
         self.tree.bind('<<TreeviewSelect>>', self.on_tree_select)
 
         def prevent_art_resize(event):
@@ -428,6 +446,11 @@ class DJAppUI:
         self.tree.bind('<Button-1>', prevent_art_resize, add='+')
         self.tree.bind('<B1-Motion>', prevent_art_resize, add='+')
         self.tree.bind('<Double-1>', self.on_double_click)
+
+        self.tree.bind('<ButtonPress-1>', self._on_drag_press, add='+')
+        self.tree.bind('<B1-Motion>', self._on_drag_motion, add='+')
+        self.tree.bind('<ButtonRelease-1>', self._on_drag_release, add='+')
+        self.root.bind('<Escape>', self._cancel_drag, add='+')
 
 
         # --- RIGHT PANEL ---
@@ -460,6 +483,12 @@ class DJAppUI:
         self.create_btn(move_group, "▲", lambda: self.shift_track(-1), BTN_NORMAL, 4).pack(pady=2)
         self.create_btn(move_group, "▼", lambda: self.shift_track(1), BTN_NORMAL, 4).pack(pady=2)
         self.create_btn(move_group, "▼▼", lambda: self.shift_track(5), "#444444", 4).pack(pady=(2, 5))
+
+        out_group = tk.Frame(right_inner, bg=BG_MAIN, highlightbackground=BORDER, highlightthickness=1)
+        out_group.pack(pady=(10, 5), padx=5, fill=tk.X)
+        tk.Label(out_group, text="Set", bg=BG_MAIN, fg=FG_TEXT, font=("Helvetica", 9, "bold")).pack(pady=(5, 2))
+        self.btn_sort_out = self.create_btn(out_group, "✕ Remove", self.toggle_inactive, BTN_NORMAL, 8)
+        self.btn_sort_out.pack(pady=(2, 5))
 
         # --- BOTTOM TIMELINE & AUDIO ---
         timeline_frame = tk.Frame(self.root, bg=BG_MAIN)
@@ -1032,7 +1061,16 @@ class DJAppUI:
             self.vinyl_animator.update_artwork(track['filename'])
         else:
             self.vinyl_animator.update_artwork(None)
+        self._refresh_sort_btn()
         self.update_set_length_labels()
+
+    def _refresh_sort_btn(self):
+        if not hasattr(self, 'btn_sort_out'): return
+        sel = self.get_selected_idx()
+        if sel is not None and self.project.tracks[sel].get('inactive', False):
+            self.btn_sort_out.config(text="↺ Restore")
+        else:
+            self.btn_sort_out.config(text="✕ Remove")
 
     def on_double_click(self, event):
         row_id = self.tree.identify_row(event.y)
@@ -1177,11 +1215,11 @@ class DJAppUI:
         if idx is not None:
             track = self.project.tracks[idx]
             vol = track.get('volume', 100.0) / 100.0
-            self.audio.play_from(os.path.join(self.project.current_folder, self.audio.current_track), target, volume=vol)
+            self.audio.play_from(os.path.join(self.project.current_folder, track['filename']), target, volume=vol)
             self.seek_offset = target
             self.btn_play_pause.config(text="⏸ Pause")
             self.sync_ui_state()
-            
+
     def shift_cursor(self, offset):
         idx = self.get_selected_idx()
         if idx is None:
@@ -1211,7 +1249,180 @@ class DJAppUI:
                 self.tree.focus(item)
                 self.tree.see(item)
                 self.tree.event_generate("<<TreeviewSelect>>")
-                self.project.needs_save = True 
+                self.project.needs_save = True
+
+    def toggle_inactive(self):
+        idx = self.get_selected_idx()
+        if idx is None: return
+        self.push_undo()
+        new_idx = self.project.toggle_inactive(idx)
+        self.refresh_tree()
+        self.select_track_by_index(new_idx)
+        self.project.needs_save = True
+
+    def _on_drag_press(self, event):
+        if self.tree.identify_region(event.x, event.y) in ("heading", "separator"):
+            return
+        row_id = self.tree.identify_row(event.y)
+        if not row_id:
+            self._drag_src_idx = None
+            return
+        self._drag_src_idx = self.tree.index(row_id)
+        self._drag_y_start = event.y_root
+        self._drag_active = False
+        self._drop_intended_idx = None
+
+    def _on_drag_motion(self, event):
+        if self._drag_src_idx is None: return
+        if not self._drag_active:
+            if abs(event.y_root - self._drag_y_start) < 6:
+                return
+            self._drag_active = True
+            try: self.tree.config(cursor="hand2")
+            except tk.TclError: pass
+            if self._drop_indicator is None:
+                self._drop_indicator = tk.Frame(self.list_frame, bg=HIGHLIGHT, height=2)
+
+        n = len(self.project.tracks)
+        if n == 0:
+            return
+
+        over_id = self.tree.identify_row(event.y)
+        if over_id:
+            over_idx = self.tree.index(over_id)
+            bbox = self.tree.bbox(over_id)
+            if bbox:
+                x, y, w, h = bbox
+                if event.y < y + h / 2:
+                    intended = over_idx
+                    indicator_y = y
+                else:
+                    intended = over_idx + 1
+                    indicator_y = y + h
+            else:
+                intended = over_idx
+                indicator_y = 0
+        else:
+            # Below all rows — drop at end
+            intended = n
+            last_id = self.tree.get_children()[-1] if self.tree.get_children() else None
+            bbox = self.tree.bbox(last_id) if last_id else None
+            if bbox:
+                indicator_y = bbox[1] + bbox[3]
+            else:
+                indicator_y = 0
+
+        self._drop_intended_idx = intended
+        self._drop_indicator.place(x=0, y=max(0, indicator_y - 1), relwidth=1.0)
+        self._drop_indicator.lift()
+
+    def _on_drag_release(self, event):
+        if not self._drag_active or self._drag_src_idx is None or self._drop_intended_idx is None:
+            self._reset_drag()
+            return
+
+        src = self._drag_src_idx
+        intended = self._drop_intended_idx
+        n = len(self.project.tracks)
+        intended = max(0, min(n, intended))
+        new_idx = intended - 1 if src < intended else intended
+        new_idx = max(0, min(n - 1, new_idx))
+
+        if new_idx != src:
+            self.push_undo()
+            offset = new_idx - src
+            actual_new = self.project.shift_track(src, offset)
+            self.refresh_tree()
+            self.select_track_by_index(actual_new)
+            self.project.needs_save = True
+
+        self._reset_drag()
+
+    def _cancel_drag(self, event=None):
+        if self._drag_active:
+            self._reset_drag()
+
+    def _reset_drag(self):
+        self._drag_src_idx = None
+        self._drag_active = False
+        self._drop_intended_idx = None
+        if self._drop_indicator is not None:
+            try: self._drop_indicator.place_forget()
+            except tk.TclError: pass
+        try: self.tree.config(cursor="")
+        except tk.TclError: pass
+
+    def _setup_file_drop(self):
+        if not _HAS_DND or not hasattr(self.root, 'drop_target_register'):
+            return
+        try:
+            self.root.drop_target_register(DND_FILES)
+            self.root.dnd_bind('<<Drop>>', self.on_file_drop)
+            self.root.dnd_bind('<<DropEnter>>', self._on_drop_enter)
+            self.root.dnd_bind('<<DropLeave>>', self._on_drop_leave)
+        except Exception as e:
+            print(f"DnD setup failed: {e}")
+
+    def _on_drop_enter(self, event):
+        self._show_drop_overlay()
+
+    def _on_drop_leave(self, event):
+        self._hide_drop_overlay()
+
+    def _show_drop_overlay(self):
+        if not hasattr(self, '_drop_overlay') or self._drop_overlay is None:
+            self._drop_overlay = tk.Label(
+                self.root, text="⬇   Drop to Add Tracks   ⬇",
+                bg=HIGHLIGHT, fg="#ffffff", font=("Helvetica", 20, "bold"),
+                padx=40, pady=20, borderwidth=0,
+            )
+        try:
+            self._drop_overlay.place(relx=0.5, rely=0.5, anchor='center')
+            self._drop_overlay.lift()
+        except tk.TclError:
+            pass
+        try:
+            self.list_frame.config(highlightbackground=HIGHLIGHT, highlightthickness=2)
+        except tk.TclError:
+            pass
+
+    def _hide_drop_overlay(self):
+        if hasattr(self, '_drop_overlay') and self._drop_overlay is not None:
+            try: self._drop_overlay.place_forget()
+            except tk.TclError: pass
+        try:
+            self.list_frame.config(highlightbackground=BORDER, highlightthickness=1)
+        except tk.TclError:
+            pass
+
+    def on_file_drop(self, event):
+        self._hide_drop_overlay()
+        if not self.project.is_saved_set:
+            messagebox.showinfo("No Project", "Create or load a project first, then drop tracks onto the window.")
+            return
+        try:
+            raw = self.root.tk.splitlist(event.data)
+        except Exception:
+            raw = event.data.split() if isinstance(event.data, str) else []
+
+        valid_exts = ('.mp3', '.wav', '.flac', '.wma')
+        files = []
+        for p in raw:
+            path = p.strip().strip('{}')
+            if os.path.isdir(path):
+                for root, _, names in os.walk(path):
+                    for name in sorted(names):
+                        if name.lower().endswith(valid_exts) and not name.startswith('.'):
+                            files.append(os.path.join(root, name))
+            elif os.path.isfile(path) and path.lower().endswith(valid_exts):
+                files.append(path)
+
+        if not files:
+            messagebox.showinfo("No Audio", "No supported audio files (.mp3, .wav, .flac, .wma) found in the drop.")
+            return
+
+        self.project_actions.add_tracks(files=files)
+
 
     # --- RESTORED: format_time, on_slider_press, update_timeline_ui ---
     def format_time(self, seconds):
@@ -1247,7 +1458,7 @@ class DJAppUI:
             if idx is not None:
                 track = self.project.tracks[idx]
                 vol = track.get('volume', 100.0) / 100.0
-                self.audio.play_from(os.path.join(self.project.current_folder, self.audio.current_track), val, volume=vol)
+                self.audio.play_from(os.path.join(self.project.current_folder, track['filename']), val, volume=vol)
                 self.seek_offset = val
                 self.btn_play_pause.config(text="⏸ Pause")
                 self.sync_ui_state()
@@ -1312,31 +1523,33 @@ class DJAppUI:
     def refresh_tree(self):
         for item in self.tree.get_children():
             self.tree.delete(item)
-            
+
         self.tree_images = {}
-        
+
         default_art_path = get_resource_path(os.path.join("assets", "default.png"))
+        def_pil = None
         if os.path.exists(default_art_path):
             try:
-                def_img = Image.open(default_art_path).convert("RGBA")
-                def_img = ImageOps.fit(def_img, (36, 36), Image.Resampling.LANCZOS)
-                self.default_thumb = ImageTk.PhotoImage(def_img)
+                def_pil = Image.open(default_art_path).convert("RGBA")
+                def_pil = ImageOps.fit(def_pil, (36, 36), Image.Resampling.LANCZOS)
             except Exception:
-                self.default_thumb = None
-        else:
-            def_img = Image.new("RGBA", (36, 36), (40, 40, 40, 255))
-            self.default_thumb = ImageTk.PhotoImage(def_img)
-            
+                def_pil = None
+        if def_pil is None:
+            def_pil = Image.new("RGBA", (36, 36), (40, 40, 40, 255))
+        self.default_thumb = ImageTk.PhotoImage(def_pil)
+        self.default_thumb_dim = ImageTk.PhotoImage(ImageEnhance.Brightness(def_pil).enhance(0.25))
+
         for i, track in enumerate(self.project.tracks):
+            is_inactive = track.get('inactive', False)
             norm_dot = "●" if track.get('is_normalized', False) else "○"
             size_str = f"{track.get('size_mb', 0.0):.1f}"
-            
+
             artist = track.get('artist', '')
             album = track.get('album', '')
             song = track.get('song', track.get('original_name', track['filename']))
             if not song: song = track.get('original_name', track['filename'])
-            
-            thumb_img = self.default_thumb
+
+            thumb_img = self.default_thumb_dim if is_inactive else self.default_thumb
             thumb_filename = track.get('thumb_filename', '')
             if thumb_filename:
                 thumb_path = os.path.join(self.project.current_folder, thumb_filename)
@@ -1344,23 +1557,26 @@ class DJAppUI:
                     try:
                         img = Image.open(thumb_path).convert("RGBA")
                         img = ImageOps.fit(img, (36, 36), Image.Resampling.LANCZOS)
+                        if is_inactive:
+                            img = ImageEnhance.Brightness(img).enhance(0.25)
                         photo = ImageTk.PhotoImage(img)
                         self.tree_images[i] = photo
                         thumb_img = photo
                     except Exception:
                         pass
-                        
+
             self.tree.insert("", tk.END, text="", image=thumb_img if thumb_img else "", values=(
                 f"{i + 1}",
-                f"{track['bpm']}", 
-                f"{track['tone']}", 
+                f"{track['bpm']}",
+                f"{track['tone']}",
                 song,
                 artist,
                 album,
                 size_str,
                 norm_dot
-            ))
+            ), tags=("inactive",) if is_inactive else ())
         self.update_set_length_labels()
+        self._refresh_sort_btn()
 
     def toggle_play_pause(self):
         try:
@@ -1405,7 +1621,7 @@ class DJAppUI:
             self.vinyl_animator.set_speed(max(1.5, bpm / 35.0))
 
             self.audio.current_track = track['filename']
-            
+
             # Look how clean this is now!
             vol = track.get('volume', 100.0) / 100.0
             self.audio.play(os.path.join(self.project.current_folder, track['filename']), volume=vol)
@@ -1445,7 +1661,7 @@ class DJAppUI:
             if idx is not None:
                 track = self.project.tracks[idx]
                 vol = track.get('volume', 100.0) / 100.0
-                self.audio.play_from(os.path.join(self.project.current_folder, self.audio.current_track), 0, volume=vol)
+                self.audio.play_from(os.path.join(self.project.current_folder, track['filename']), 0, volume=vol)
                 self.seek_offset = 0
                 self.timeline_var.set(0)
                 self.btn_play_pause.config(text="⏸ Pause")
@@ -1462,7 +1678,7 @@ class DJAppUI:
             elif idx == 0:
                 track = self.project.tracks[idx]
                 vol = track.get('volume', 100.0) / 100.0
-                self.audio.play_from(os.path.join(self.project.current_folder, self.audio.current_track), 0, volume=vol)
+                self.audio.play_from(os.path.join(self.project.current_folder, track['filename']), 0, volume=vol)
                 self.seek_offset = 0
                 self.timeline_var.set(0)
                 self.sync_ui_state()
@@ -1470,6 +1686,23 @@ class DJAppUI:
 if __name__ == "__main__":
     import multiprocessing
     multiprocessing.freeze_support() # Fix joblib/multiprocessing spawning issues in PyInstaller
-    root = tk.Tk()
+    root = None
+    if _HAS_DND:
+        try:
+            root = TkinterDnD.Tk()
+        except Exception as e:
+            print(f"[warn] tkdnd unavailable ({e}); drag-and-drop disabled.")
+            _HAS_DND = False
+            # TkinterDnD.Tk()'s super().__init__ already created a Tk interpreter before
+            # _require() failed; tkinter._default_root may still point at it. Tear it down
+            # so the fresh tk.Tk() below is the only root.
+            try:
+                if tk._default_root is not None:
+                    tk._default_root.destroy()
+            except Exception:
+                pass
+            tk._default_root = None
+    if root is None:
+        root = tk.Tk()
     app = DJAppUI(root)
     root.mainloop()

@@ -1,11 +1,13 @@
 import os
 import shutil
+import subprocess
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from constants import BG_MAIN, BG_LIST, FG_TEXT, HIGHLIGHT, BTN_NORMAL, BTN_HOVER
 from ui_components import create_btn
+from AudioCore import get_ffmpeg_path
 
 class ExportDialog:
     def __init__(self, app):
@@ -19,9 +21,9 @@ class ExportDialog:
 
         win = tk.Toplevel(self.root)
         win.title("Export / Render Audio")
-        win.geometry("540x550") 
+        win.geometry("540x600")
         win.configure(bg=BG_MAIN)
-        win.grab_set() 
+        win.grab_set()
 
         tk.Label(win, text="Audio Render Settings", bg=BG_MAIN, fg=HIGHLIGHT, font=("Helvetica", 12, "bold")).pack(pady=15)
 
@@ -44,10 +46,10 @@ class ExportDialog:
         self.btn_browse = create_btn(path_frame, "📂 Browse", lambda: self.browse_export_dir(win), BTN_NORMAL)
         self.btn_browse.pack(side=tk.LEFT, padx=10)
 
-        rb_inplace = tk.Radiobutton(win, text="Render In-Place (Overwrites files, saves final order)", variable=self.render_mode, value="inplace", 
+        self.rb_inplace = tk.Radiobutton(win, text="Render In-Place (Overwrites files, saves final order)", variable=self.render_mode, value="inplace",
                                     bg=BG_MAIN, fg=FG_TEXT, selectcolor=BG_LIST, activebackground=BG_MAIN, activeforeground=FG_TEXT, command=update_mode)
-        rb_inplace.pack(anchor="w", padx=40, pady=(5, 10))
-        if not self.app.project.is_saved_set: rb_inplace.config(state=tk.DISABLED) 
+        self.rb_inplace.pack(anchor="w", padx=40, pady=(5, 10))
+        if not self.app.project.is_saved_set: self.rb_inplace.config(state=tk.DISABLED)
         update_mode()
 
         tk.Label(win, text="Processing:", bg=BG_MAIN, fg=FG_TEXT, font=("Helvetica", 9, "bold")).pack(anchor="w", padx=40, pady=(10, 5))
@@ -57,6 +59,16 @@ class ExportDialog:
 
         self.bake_dsp_var = tk.BooleanVar(value=True)
         tk.Checkbutton(win, text=" Bake-in DSP (Effects & Volume)", variable=self.bake_dsp_var, bg=BG_MAIN, fg=FG_TEXT, selectcolor=BG_LIST, activebackground=BG_MAIN, activeforeground=FG_TEXT, command=self.update_export_warnings).pack(anchor="w", padx=40)
+
+        self.continuous_var = tk.BooleanVar(value=False)
+        def update_continuous_mode():
+            if self.continuous_var.get():
+                self.render_mode.set("new")
+                self.rb_inplace.config(state=tk.DISABLED)
+            elif self.app.project.is_saved_set:
+                self.rb_inplace.config(state=tk.NORMAL)
+            update_mode()
+        tk.Checkbutton(win, text=" Export as Single Continuous MP3 (one combined file)", variable=self.continuous_var, bg=BG_MAIN, fg=FG_TEXT, selectcolor=BG_LIST, activebackground=BG_MAIN, activeforeground=FG_TEXT, command=update_continuous_mode).pack(anchor="w", padx=40)
 
         self.lbl_warning = tk.Label(win, text="⚠️ Warning: Normalizing while baking DSP/volume may cause\nunexpected loudness, as the normalizer fights the manual offsets.", fg="#e2a84a", bg=BG_MAIN, justify=tk.LEFT)
         self.update_export_warnings()
@@ -88,7 +100,8 @@ class ExportDialog:
             self.export_path_var.set(os.path.join(d, f"{folder_name}_Export"))
 
     def start_render_thread(self, window):
-        in_place = (self.render_mode.get() == "inplace")
+        continuous = self.continuous_var.get()
+        in_place = (self.render_mode.get() == "inplace") and not continuous
         if in_place: export_dir = self.app.project.current_folder
         else:
             export_dir = self.export_path_var.get()
@@ -97,7 +110,104 @@ class ExportDialog:
                 return
             os.makedirs(export_dir, exist_ok=True)
         self.btn_start_render.config(state=tk.DISABLED)
-        threading.Thread(target=self.render_worker, args=(window, export_dir, in_place), daemon=True).start()
+        if continuous:
+            threading.Thread(target=self.render_continuous_worker, args=(window, export_dir), daemon=True).start()
+        else:
+            threading.Thread(target=self.render_worker, args=(window, export_dir, in_place), daemon=True).start()
+
+    def render_continuous_worker(self, window, export_dir):
+        try:
+            tracks = [t for t in self.app.project.tracks if not t.get('inactive', False)]
+            if not tracks:
+                self.app.root.after(0, messagebox.showwarning, "Nothing to Render", "No active tracks to render. (All tracks are marked Removed.)", parent=window)
+                self.app.root.after(0, self.btn_start_render.config, {"state": tk.NORMAL})
+                return
+
+            comp_map = {"None (Highest Quality)": "0", "Light (~190 kbps)": "2", "Medium (~165 kbps)": "4", "Heavy (~115 kbps)": "6", "Extreme / Demo (~85 kbps)": "8"}
+            quality_flag = comp_map.get(self.comp_var.get(), "0")
+            normalize = self.norm_var.get()
+            bake_dsp = self.bake_dsp_var.get()
+            lufs_target = -14.0
+
+            try: self.app.audio.unload()
+            except Exception: pass
+
+            temp_paths = []
+            n = len(tracks)
+            for i, track in enumerate(tracks):
+                source_path = os.path.join(self.app.project.current_folder, track['filename'])
+                temp_name = f".tmp_continuous_{i:03d}.mp3"
+                temp_path = os.path.join(export_dir, temp_name)
+
+                volume = (track.get('volume', 100.0) / 100.0) if bake_dsp else 1.0
+                track_dsp = track.get('dsp_state', {
+                    'master_bypass': True,
+                    'chain_order': ['eq', 'dyn'],
+                    'eq_bypass': True, 'eq_low': 0.0, 'eq_mid': 0.0, 'eq_high': 0.0,
+                    'dyn_bypass': True, 'dyn_threshold': 0.0, 'dyn_ratio': 1.0, 'dyn_attack': 5.0, 'dyn_release': 100.0, 'dyn_makeup': 0.0,
+                    'limiter_bypass': True, 'limiter_softclip': False, 'limiter_input': 0.0, 'limiter_output': 0.0,
+                    'vsts': {}
+                })
+                if not bake_dsp:
+                    track_dsp = track_dsp.copy()
+                    track_dsp['master_bypass'] = True
+                self.app.audio.dsp_state = track_dsp
+
+                is_dsp_active = not track_dsp.get('master_bypass', False) and (
+                    not track_dsp.get('eq_bypass', False) or
+                    not track_dsp.get('dyn_bypass', False) or
+                    not track_dsp.get('limiter_bypass', False) or
+                    any(not v.get('bypass', True) for v in track_dsp.get('vsts', {}).values())
+                )
+                needs_render = normalize or quality_flag != "0" or volume != 1.0 or is_dsp_active or not source_path.lower().endswith('.mp3')
+
+                self.app.root.after(0, self.lbl_render_status.config, {"text": f"Rendering ({i+1}/{n}): {track.get('song') or track.get('original_name', track['filename'])}"})
+                try:
+                    if not needs_render:
+                        shutil.copy2(source_path, temp_path)
+                    else:
+                        self.app.audio.render_export_track(source_path, temp_path, normalize, quality_flag, lufs_target, volume)
+                    temp_paths.append(temp_path)
+                except Exception as e:
+                    print(f"Continuous render error on {track.get('filename')}: {e}")
+
+                self.app.root.after(0, self.render_progress_var.set, ((i + 1) / n) * 95.0)
+
+            if not temp_paths:
+                raise RuntimeError("No tracks were rendered successfully.")
+
+            self.app.root.after(0, self.lbl_render_status.config, {"text": "Concatenating into single MP3..."})
+            folder_basename = os.path.basename(self.app.project.current_folder) or "DJ_Set"
+            final_name = f"{folder_basename}_Continuous.mp3"
+            final_path = os.path.join(export_dir, final_name)
+            list_path = os.path.join(export_dir, ".concat_list.txt")
+            try:
+                with open(list_path, 'w') as fh:
+                    for p in temp_paths:
+                        escaped = p.replace("'", "'\\''")
+                        fh.write(f"file '{escaped}'\n")
+
+                cmd = [get_ffmpeg_path(), '-y', '-f', 'concat', '-safe', '0', '-i', list_path, '-c', 'copy', final_path]
+                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            finally:
+                for p in temp_paths:
+                    try: os.remove(p)
+                    except Exception: pass
+                try: os.remove(list_path)
+                except Exception: pass
+
+            self.app.root.after(0, self.render_progress_var.set, 100.0)
+            self.app.root.after(0, self.lbl_render_status.config, {"text": "Done."})
+            self.app.root.after(0, self.finish_continuous_render, window, final_path)
+
+        except Exception as crash_error:
+            print(f"CONTINUOUS RENDER CRASH: {crash_error}")
+            self.app.root.after(0, messagebox.showerror, "Render Failed", f"Continuous render failed:\n\n{crash_error}", parent=window)
+            self.app.root.after(0, self.btn_start_render.config, {"state": tk.NORMAL})
+
+    def finish_continuous_render(self, window, final_path):
+        window.destroy()
+        messagebox.showinfo("Export Complete", f"Continuous mix written to:\n\n{final_path}")
 
     def render_worker(self, window, export_dir, in_place):
         try:
