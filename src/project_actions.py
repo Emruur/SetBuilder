@@ -189,9 +189,9 @@ class ProjectActions:
         self.project.save_metadata(folder)
         self.project.save_app_memory()
         
-        self.add_tracks(files=[os.path.join(folder, f) for f in files_to_process], sort_by_bpm_at_end=not use_existing_order, select_first_at_end=True)
+        self.add_tracks(files=[os.path.join(folder, f) for f in files_to_process], select_first_at_end=True)
 
-    def add_tracks(self, files=None, sort_by_bpm_at_end=False, select_first_at_end=False):
+    def add_tracks(self, files=None, select_first_at_end=False):
         if not self.project.is_saved_set: return
         if not files:
             files = filedialog.askopenfilenames(title="Select Tracks to Import", filetypes=[("Audio Files", "*.mp3 *.wav *.flac")], parent=self.root)
@@ -206,12 +206,12 @@ class ProjectActions:
         self.app.lbl_folder.config(text=f"Importing {len(files)} tracks...")
         self.app.progress_bar.pack(fill=tk.X, pady=5)
         self.app.progress_var.set(0)
-        should_sort = self.project.is_bpm_sorted() or sort_by_bpm_at_end
-        threading.Thread(target=self.add_tracks_worker, args=(list(files), normalize_new, should_sort, select_first_at_end), daemon=True).start()
+        threading.Thread(target=self.add_tracks_worker, args=(list(files), normalize_new, select_first_at_end), daemon=True).start()
 
-    def add_tracks_worker(self, filepaths, normalize_new, was_sorted, select_first_at_end=False):
+    def add_tracks_worker(self, filepaths, normalize_new, select_first_at_end=False):
         total, lufs_target = len(filepaths), self.project.settings.get("lufs_target", -14.0)
         new_filenames = []
+        self.root.after(0, self.app.start_import_spinner, total)
         for i, filepath in enumerate(filepaths):
             path_obj, ext = Path(filepath), Path(filepath).suffix.lower()
             original_name = self.project.clean_name(path_obj.name) 
@@ -242,7 +242,7 @@ class ProjectActions:
                         print(f"Thumb error: {e}")
                         
                 insert_idx = next((j for j, tt in enumerate(self.project.tracks) if tt.get('inactive', False)), len(self.project.tracks))
-                self.project.tracks.insert(insert_idx, {
+                new_track = {
                     'filename': new_filename, 'original_name': original_name,
                     'artist': artist, 'album': album, 'song': song, 'thumb_filename': thumb_filename,
                     'bpm': bpm, 'tone': tone, 'duration': duration,
@@ -255,15 +255,16 @@ class ProjectActions:
                         'limiter_bypass': True, 'limiter_softclip': False, 'limiter_input': 0.0, 'limiter_output': 0.0,
                         'vsts': {}
                     }
-                })
+                }
+                self.project.tracks.insert(insert_idx, new_track)
                 new_filenames.append(new_filename)
+                self.root.after(0, self.app._append_track_to_tree, new_track)
             except Exception as e: print(f"Error adding track: {e}")
             self.root.after(0, self.app.progress_var.set, ((i + 1) / total) * 100)
+            self.root.after(0, self.app.update_import_spinner, total - (i + 1))
 
         def on_done():
-            if was_sorted:
-                self.project.resort_by_bpm()
-            self.app.refresh_tree()
+            self.app.update_import_spinner(0)
             self.app.lbl_folder.config(text=f"Loaded: {os.path.basename(self.project.current_folder)}")
             self.app.btn_add.config(state=tk.NORMAL)
             self.app.progress_bar.pack_forget()

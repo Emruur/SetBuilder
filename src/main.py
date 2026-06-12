@@ -7,6 +7,7 @@ import datetime
 import random
 import tkinter as tk
 from tkinter import messagebox, ttk, filedialog
+from difflib import SequenceMatcher
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -57,6 +58,12 @@ class DJAppUI:
         self._undo_stack = []
         self._redo_stack = []
 
+        self._importing_count = 0
+        self._spinner_idx = 0
+        self._spinner_job = None
+
+        self._drop_leave_timer = None
+
         self._drag_src_idx = None
         self._drag_y_start = 0
         self._drag_active = False
@@ -84,6 +91,27 @@ class DJAppUI:
                     print(f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Auto-saved metadata.", flush=True)
                 except Exception:
                     pass
+
+    def start_import_spinner(self, total):
+        self._importing_count = total
+        if self._spinner_job is None:
+            self._tick_spinner()
+
+    def update_import_spinner(self, remaining):
+        self._importing_count = remaining
+        if remaining == 0:
+            if self._spinner_job:
+                self.root.after_cancel(self._spinner_job)
+                self._spinner_job = None
+            self._spinner_lbl.config(text="")
+
+    def _tick_spinner(self):
+        frames = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷']
+        f = frames[self._spinner_idx % len(frames)]
+        n = self._importing_count
+        self._spinner_lbl.config(text=f"{f}  {n} track{'s' if n != 1 else ''} importing")
+        self._spinner_idx += 1
+        self._spinner_job = self.root.after(80, self._tick_spinner)
 
     def create_group_frame(self, parent, padx=5, pady=5):
         return create_group_frame(parent, padx, pady)
@@ -128,6 +156,9 @@ class DJAppUI:
 
         self.lbl_folder = tk.Label(top_frame, text="No project loaded", bg=BG_MAIN, fg=FG_TEXT)
         self.lbl_folder.pack(side=tk.LEFT, padx=10)
+
+        self._spinner_lbl = tk.Label(top_frame, text="", bg=BG_MAIN, fg=HIGHLIGHT, font=("Courier", 10, "bold"))
+        self._spinner_lbl.pack(side=tk.RIGHT, padx=10)
 
         self.progress_frame = tk.Frame(self.root, bg=BG_MAIN)
         self.progress_frame.pack(fill=tk.X, padx=10, pady=0)
@@ -458,10 +489,28 @@ class DJAppUI:
         right_control_frame.pack(side=tk.LEFT, padx=(10, 0), fill=tk.Y)
         right_inner = tk.Frame(right_control_frame, bg=BG_MAIN)
         right_inner.pack(expand=True)
-        
+
+        search_btn = tk.Label(right_inner, text="⌕", bg=BTN_NORMAL, fg=FG_TEXT,
+                              font=("Helvetica", 18), cursor="hand2",
+                              padx=10, pady=4,
+                              highlightbackground=BORDER, highlightthickness=1)
+        search_btn.pack(pady=(4, 8), padx=5, fill=tk.X)
+        search_btn.bind("<Enter>",    lambda e: search_btn.config(bg=BTN_HOVER))
+        search_btn.bind("<Leave>",    lambda e: search_btn.config(bg=BTN_NORMAL))
+        search_btn.bind("<Button-1>", lambda e: self.open_search_popup())
+
         math_group = tk.Frame(right_inner, bg=BG_MAIN, highlightbackground=BORDER, highlightthickness=1)
         math_group.pack(pady=(0, 10), padx=5, fill=tk.X)
         tk.Label(math_group, text="BPM", bg=BG_MAIN, fg=FG_TEXT, font=("Helvetica", 9, "bold")).pack(pady=(5,2))
+        self.bpm_var = tk.StringVar()
+        self.bpm_entry = tk.Entry(math_group, textvariable=self.bpm_var, width=6,
+                                   bg=BG_LIST, fg=HIGHLIGHT, insertbackground=HIGHLIGHT,
+                                   font=("Courier", 12, "bold"), bd=0,
+                                   highlightthickness=1, highlightbackground=BORDER,
+                                   highlightcolor=HIGHLIGHT, justify='center')
+        self.bpm_entry.pack(pady=(0, 4), ipady=3)
+        self.bpm_entry.bind("<Return>", self._on_bpm_edit)
+        self.bpm_entry.bind("<FocusOut>", self._on_bpm_edit)
         self.create_btn(math_group, "x2", lambda: self.modify_bpm(2.0), BTN_NORMAL, 4).pack(pady=2)
         self.create_btn(math_group, "÷2", lambda: self.modify_bpm(0.5), BTN_NORMAL, 4).pack(pady=2)
         self.create_btn(math_group, "↻ Sort", self.resort_project, "#a86a11", 6).pack(pady=(10, 5), padx=5)
@@ -1003,6 +1052,8 @@ class DJAppUI:
             self.volume_var.set(vol_pct)
             self.lbl_volume.config(text=f"{vol_pct}%")
             self.slider_volume.configure(command=self.on_volume_slide)
+            if self.bpm_entry != self.root.focus_get():
+                self.bpm_var.set(str(track.get('bpm', '')))
             
             dsp = track.get('dsp_state', {
                 'master_bypass': True,
@@ -1134,6 +1185,7 @@ class DJAppUI:
     def bind_shortcuts(self):
         self.root.bind("<KeyPress>", self.on_key_press)
         self.root.bind("<KeyRelease>", self.on_key_release)
+        self.root.bind("<FocusIn>", self._on_app_focus_in)
         for key in ["<Up>", "<Down>", "<Left>", "<Right>"]:
             self.root.bind(key, self.on_arrow_override)
             self.tree.bind(key, self.on_arrow_override)
@@ -1143,6 +1195,8 @@ class DJAppUI:
         self.root.bind("<Command-Z>", lambda e: self.redo())
         self.root.bind("<Control-z>", lambda e: self.undo())
         self.root.bind("<Control-y>", lambda e: self.redo())
+        self.root.bind("<Command-f>", lambda e: self.open_search_popup())
+        self.root.bind("<Control-f>", lambda e: self.open_search_popup())
 
     # --- RESTORED: Transport logic ---
     def on_arrow_override(self, event):
@@ -1154,6 +1208,12 @@ class DJAppUI:
         if isinstance(event.widget, (tk.Entry, ttk.Combobox)): return
         self.toggle_play_pause()
         return "break"
+
+    def _on_app_focus_in(self, event):
+        if event.widget != self.root: return
+        canvas = getattr(self, '_drop_canvas', None)
+        if canvas and canvas.winfo_ismapped():
+            self._hide_drop_overlay()
 
     def on_key_press(self, event):
         if isinstance(event.widget, (tk.Entry, ttk.Combobox)): return
@@ -1360,40 +1420,63 @@ class DJAppUI:
             self.root.dnd_bind('<<Drop>>', self.on_file_drop)
             self.root.dnd_bind('<<DropEnter>>', self._on_drop_enter)
             self.root.dnd_bind('<<DropLeave>>', self._on_drop_leave)
+            self.root.dnd_bind('<<DropPosition>>', self._on_drop_position)
         except Exception as e:
             print(f"DnD setup failed: {e}")
 
     def _on_drop_enter(self, event):
         self._show_drop_overlay()
+        self._reset_drag_heartbeat()
+
+    def _on_drop_position(self, event):
+        self._reset_drag_heartbeat()
+        return 'copy'
 
     def _on_drop_leave(self, event):
+        self._cancel_drag_heartbeat()
         self._hide_drop_overlay()
 
+    def _reset_drag_heartbeat(self):
+        self._cancel_drag_heartbeat()
+        self._drag_heartbeat = self.root.after(600, self._hide_drop_overlay)
+
+    def _cancel_drag_heartbeat(self):
+        job = getattr(self, '_drag_heartbeat', None)
+        if job:
+            self.root.after_cancel(job)
+            self._drag_heartbeat = None
+
     def _show_drop_overlay(self):
-        if not hasattr(self, '_drop_overlay') or self._drop_overlay is None:
-            self._drop_overlay = tk.Label(
-                self.root, text="⬇   Drop to Add Tracks   ⬇",
-                bg=HIGHLIGHT, fg="#ffffff", font=("Helvetica", 20, "bold"),
-                padx=40, pady=20, borderwidth=0,
-            )
+        if not hasattr(self, '_drop_canvas') or self._drop_canvas is None:
+            W, H, R = 260, 220, 22
+            C = "#111111"
+            self._drop_canvas = tk.Canvas(
+                self.root, bg=BG_MAIN, highlightthickness=0, width=W, height=H)
+            # Rounded rectangle: two fill rects + four corner arcs
+            self._drop_canvas.create_rectangle(R, 0, W-R, H, fill=C, outline=C)
+            self._drop_canvas.create_rectangle(0, R, W, H-R, fill=C, outline=C)
+            for ax, ay, start in [(0,0,90),(W-2*R,0,0),(W-2*R,H-2*R,270),(0,H-2*R,180)]:
+                self._drop_canvas.create_arc(ax, ay, ax+2*R, ay+2*R,
+                                             start=start, extent=90, fill=C, outline=C)
+            self._drop_canvas.create_text(W//2, H//2, text="+", fill=HIGHLIGHT,
+                                          font=("Helvetica", 110, "bold"))
         try:
-            self._drop_overlay.place(relx=0.5, rely=0.5, anchor='center')
-            self._drop_overlay.lift()
-        except tk.TclError:
-            pass
-        try:
-            self.list_frame.config(highlightbackground=HIGHLIGHT, highlightthickness=2)
+            if not self._drop_canvas.winfo_ismapped():
+                self._drop_canvas.place(relx=0.5, rely=0.5, anchor='center')
+                self._drop_canvas.lift()
         except tk.TclError:
             pass
 
     def _hide_drop_overlay(self):
-        if hasattr(self, '_drop_overlay') and self._drop_overlay is not None:
-            try: self._drop_overlay.place_forget()
-            except tk.TclError: pass
-        try:
-            self.list_frame.config(highlightbackground=BORDER, highlightthickness=1)
-        except tk.TclError:
-            pass
+        self._cancel_drag_heartbeat()
+        if hasattr(self, '_drop_canvas') and self._drop_canvas is not None:
+            try:
+                self._drop_canvas.destroy()
+            except tk.TclError:
+                pass
+            self._drop_canvas = None
+        # Schedule repaint for next tick — forces macOS to redraw even if unfocused
+        self.root.after(0, self.root.update_idletasks)
 
     def on_file_drop(self, event):
         self._hide_drop_overlay()
@@ -1474,12 +1557,154 @@ class DJAppUI:
             self.tree.selection_set(item)
             self.project.needs_save = True
 
+    def _on_bpm_edit(self, event=None):
+        idx = self.get_selected_idx()
+        if idx is None:
+            return
+        try:
+            new_bpm = int(self.bpm_var.get().strip())
+            if new_bpm <= 0:
+                raise ValueError
+        except ValueError:
+            self.bpm_var.set(str(self.project.tracks[idx].get('bpm', '')))
+            return
+        if new_bpm == self.project.tracks[idx].get('bpm'):
+            return
+        self.push_undo()
+        self.project.tracks[idx]['bpm'] = new_bpm
+        children = self.tree.get_children()
+        if idx < len(children):
+            cur_vals = list(self.tree.item(children[idx], 'values'))
+            cur_vals[1] = str(new_bpm)
+            self.tree.item(children[idx], values=cur_vals)
+        self.project.needs_save = True
+
     def resort_project(self):
         if not self.project.tracks: return
         self.push_undo()
         self.project.resort_by_bpm()
         self.refresh_tree()
         self.project.needs_save = True
+
+    # ── Search ──────────────────────────────────────────────────────────────
+
+    # Fold Turkish (and common Latin diacritics) to base ASCII so that
+    # "satel" matches "Şatellites", "ı" matches "i", etc.
+    _FOLD = str.maketrans(
+        'şŞıİöÖğĞüÜçÇâÂîÎûÛàáäãåÀÁÄÃÅèéêëÈÉÊËìíîïÌÍÎÏòóôõøÒÓÔÕØùúûÙÚÛýÿÝ',
+        'sSiIoOgGuUcCaAiIuUaaaaaAAAAAeeeeEEEEiiiiIIIIoooooOOOOOuuuUUUyyY'
+    )
+
+    @staticmethod
+    def _fold(text):
+        return text.lower().translate(DJAppUI._FOLD)
+
+    def _search_score(self, track, query):
+        q = self._fold(query.strip())
+        if not q:
+            return 0
+        corpus = self._fold(' '.join(filter(None, [
+            track.get('song', ''), track.get('artist', ''), track.get('album', ''),
+            track.get('original_name', ''), str(track.get('bpm', '')), track.get('tone', ''),
+        ])))
+        tokens = q.split()
+        score = 0
+        if q in corpus:
+            score += 100                        # full query exact hit
+        for token in tokens:
+            if not token:
+                continue
+            if token in corpus:
+                score += 50                     # token substring hit
+            for word in corpus.split():
+                if token in word:
+                    score += 25                 # word contains token
+                elif word in token:
+                    score += 15
+                else:
+                    r = SequenceMatcher(None, token, word).ratio()
+                    if r > 0.7:
+                        score += r * 30         # fuzzy word similarity
+        return score
+
+    def open_search_popup(self):
+        if not self.project.tracks:
+            return
+
+        win = tk.Toplevel(self.root)
+        win.title("Search")
+        win.geometry("460x280")
+        win.configure(bg=BG_MAIN)
+        win.resizable(False, False)
+        win.transient(self.root)
+
+        search_var = tk.StringVar()
+        entry = tk.Entry(win, textvariable=search_var, bg=BG_LIST, fg=FG_TEXT,
+                         insertbackground=FG_TEXT, font=("Helvetica", 13), bd=0,
+                         highlightthickness=1, highlightbackground=BORDER,
+                         highlightcolor=HIGHLIGHT)
+        entry.pack(fill=tk.X, padx=14, pady=(14, 6), ipady=7)
+        entry.focus_set()
+
+        list_frame = tk.Frame(win, bg=BG_MAIN)
+        list_frame.pack(fill=tk.BOTH, expand=True, padx=14, pady=(0, 14))
+        sb = ttk.Scrollbar(list_frame, orient="vertical")
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+        results_box = tk.Listbox(list_frame, bg=BG_LIST, fg=FG_TEXT,
+                                  selectbackground=HIGHLIGHT, selectforeground='#ffffff',
+                                  font=("Courier", 11), bd=0, highlightthickness=0,
+                                  activestyle='none', yscrollcommand=sb.set)
+        results_box.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.config(command=results_box.yview)
+
+        result_indices = []
+        _timer = [None]
+
+        def do_search():
+            q = search_var.get().strip()
+            results_box.delete(0, tk.END)
+            result_indices.clear()
+            if not q:
+                return
+            scored = sorted(
+                ((self._search_score(t, q), i, t) for i, t in enumerate(self.project.tracks)),
+                key=lambda x: x[0], reverse=True
+            )
+            for score, idx, track in scored[:5]:
+                if score <= 0:
+                    break
+                song = track.get('song') or track.get('original_name', track['filename'])
+                artist = track.get('artist', '')
+                line = f"#{idx+1:02d}  {track.get('bpm','?')} BPM  {song}"
+                if artist:
+                    line += f"  — {artist}"
+                results_box.insert(tk.END, f"  {line}")
+                result_indices.append(idx)
+            if result_indices:
+                results_box.selection_set(0)
+
+        def on_type(*_):
+            if _timer[0]:
+                win.after_cancel(_timer[0])
+            _timer[0] = win.after(180, do_search)
+
+        def select_result(e=None):
+            sel = results_box.curselection()
+            if not sel or not result_indices:
+                return
+            idx = result_indices[sel[0]]
+            win.destroy()
+            self.select_track_by_index(idx)
+            self.tree.focus_set()
+
+        search_var.trace_add('write', on_type)
+        results_box.bind('<Double-Button-1>', select_result)
+        results_box.bind('<Return>', select_result)
+        entry.bind('<Return>', select_result)
+        entry.bind('<Down>', lambda e: (results_box.focus_set(),
+                                        results_box.selection_clear(0, tk.END),
+                                        results_box.selection_set(0)) and None)
+        win.bind('<Escape>', lambda e: win.destroy())
 
     def push_undo(self):
         self._undo_stack.append(copy.deepcopy(self.project.tracks))
@@ -1520,12 +1745,9 @@ class DJAppUI:
         else:
             self.lbl_set_upto.config(text="--:--")
 
-    def refresh_tree(self):
-        for item in self.tree.get_children():
-            self.tree.delete(item)
-
-        self.tree_images = {}
-
+    def _ensure_default_thumb(self):
+        if hasattr(self, 'default_thumb') and self.default_thumb is not None:
+            return
         default_art_path = get_resource_path(os.path.join("assets", "default.png"))
         def_pil = None
         if os.path.exists(default_art_path):
@@ -1538,6 +1760,60 @@ class DJAppUI:
             def_pil = Image.new("RGBA", (36, 36), (40, 40, 40, 255))
         self.default_thumb = ImageTk.PhotoImage(def_pil)
         self.default_thumb_dim = ImageTk.PhotoImage(ImageEnhance.Brightness(def_pil).enhance(0.25))
+
+    def _append_track_to_tree(self, track):
+        """Insert one track row without rebuilding the whole tree."""
+        self._ensure_default_thumb()
+        if not hasattr(self, 'tree_images'):
+            self.tree_images = {}
+
+        # Identity lookup so duplicate-content dicts don't collide
+        idx = next((i for i, t in enumerate(self.project.tracks) if t is track),
+                   len(self.project.tracks) - 1)
+
+        is_inactive = track.get('inactive', False)
+        song = track.get('song', track.get('original_name', track['filename'])) or track['filename']
+
+        thumb_img = self.default_thumb_dim if is_inactive else self.default_thumb
+        thumb_filename = track.get('thumb_filename', '')
+        if thumb_filename:
+            thumb_path = os.path.join(self.project.current_folder, thumb_filename)
+            if os.path.exists(thumb_path):
+                try:
+                    img = Image.open(thumb_path).convert("RGBA")
+                    img = ImageOps.fit(img, (36, 36), Image.Resampling.LANCZOS)
+                    if is_inactive:
+                        img = ImageEnhance.Brightness(img).enhance(0.25)
+                    photo = ImageTk.PhotoImage(img)
+                    self.tree_images[idx] = photo
+                    thumb_img = photo
+                except Exception:
+                    pass
+
+        # Insert before the first inactive row so active tracks stay on top
+        insert_pos = tk.END
+        if not is_inactive:
+            for child in reversed(self.tree.get_children()):
+                if 'inactive' in self.tree.item(child, 'tags'):
+                    insert_pos = self.tree.index(child)
+                else:
+                    break
+
+        self.tree.insert("", insert_pos, text="", image=thumb_img or "", values=(
+            f"{idx + 1}", f"{track['bpm']}", f"{track['tone']}", song,
+            track.get('artist', ''), track.get('album', ''),
+            f"{track.get('size_mb', 0.0):.1f}",
+            "●" if track.get('is_normalized', False) else "○"
+        ), tags=("inactive",) if is_inactive else ())
+        self.update_set_length_labels()
+
+    def refresh_tree(self):
+        for item in self.tree.get_children():
+            self.tree.delete(item)
+
+        self.tree_images = {}
+        self.default_thumb = None  # Force refresh_tree to always regen thumbnails
+        self._ensure_default_thumb()
 
         for i, track in enumerate(self.project.tracks):
             is_inactive = track.get('inactive', False)
