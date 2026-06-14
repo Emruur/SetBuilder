@@ -1670,7 +1670,6 @@ class DJAppUI:
     def _download_and_install_denoiser(self, on_done, on_error):
         """Download SetBuilderDenoiser.zip, extract to ~/Applications, call on_done() or on_error(msg)."""
         import urllib.request
-        import zipfile
 
         install_dir = os.path.expanduser(DENOISER_INSTALL_DIR)
         os.makedirs(install_dir, exist_ok=True)
@@ -1702,10 +1701,15 @@ class DJAppUI:
                 self.root.after(0, self._finish_task, dl_task)
                 self.root.after(0, self._enqueue_task, ext_task, 'Installing denoiser…')
 
-                # --- Extract ---
-                with zipfile.ZipFile(zip_path, 'r') as zf:
-                    zf.extractall(install_dir)
+                # --- Extract (use system unzip to preserve permissions/symlinks) ---
+                import subprocess as _sp
+                _sp.run(['unzip', '-o', zip_path, '-d', install_dir],
+                        check=True, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
                 os.remove(zip_path)
+                # Strip macOS quarantine so bundled binaries (ffmpeg) can execute
+                _sp.run(['xattr', '-rd', 'com.apple.quarantine',
+                         os.path.join(install_dir, 'SetBuilderDenoiser.app')],
+                        check=False, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
 
                 self.root.after(0, self._finish_task, ext_task)
                 self.root.after(0, on_done)
