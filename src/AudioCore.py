@@ -424,7 +424,7 @@ class AudioEngine:
                         audio = f.read(f.frames)
                         sr    = f.samplerate
                     with AudioFile(str(dest_path), 'w', samplerate=sr,
-                                   num_channels=audio.shape[0], quality=0.0) as f:
+                                   num_channels=audio.shape[0], quality='V0') as f:
                         f.write(audio)
 
                     # Copy ID3 tags from source to denoised file
@@ -443,7 +443,7 @@ class AudioEngine:
                             n_audio = f.read(f.frames)
                             n_sr    = f.samplerate
                         with AudioFile(str(noise_dest_path), 'w', samplerate=n_sr,
-                                       num_channels=n_audio.shape[0], quality=0.5) as f:
+                                       num_channels=n_audio.shape[0], quality='V5') as f:
                             f.write(n_audio)
 
                     if inference_cb:
