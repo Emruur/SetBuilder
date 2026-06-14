@@ -4,5 +4,7 @@ soundfile
 sounddevice
 pedalboard
 mutagen
+pyloudnorm
 pyinstaller
 tkinterdnd2
+audio-separator[cpu]

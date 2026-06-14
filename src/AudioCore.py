@@ -25,37 +25,9 @@ os.environ['NUMBA_CACHE_DIR'] = cache_dir
 import librosa
 from pedalboard import Pedalboard, Compressor, HighShelfFilter, LowShelfFilter, PeakFilter, Distortion, Limiter, Gain, load_plugin
 
-def _strip_own_quarantine():
-    """Remove macOS quarantine from this app's own bundle on first run after download."""
-    if not (getattr(sys, 'frozen', False) and sys.platform == 'darwin'):
-        return
-    try:
-        # Walk up from Contents/MacOS/ to the .app bundle root
-        bundle = os.path.normpath(
-            os.path.join(os.path.dirname(sys.executable), '..', '..'))
-        subprocess.run(
-            ['xattr', '-rd', 'com.apple.quarantine', bundle],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
-    except Exception:
-        pass
-
-_strip_own_quarantine()
-
-
 def get_ffmpeg_path():
-    """Determines the correct path for the ffmpeg binary, whether bundled or in system PATH."""
+    """Returns ffmpeg path — kept for any remaining ffmpeg calls (e.g. Windows export)."""
     ffmpeg_exe = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
-    if getattr(sys, 'frozen', False):
-        exe_dir = os.path.dirname(sys.executable)
-        meipass = getattr(sys, '_MEIPASS', None)
-        for d in [exe_dir,
-                  os.path.join(exe_dir, '..', 'Frameworks'),
-                  os.path.join(exe_dir, '..', 'Resources'),
-                  meipass]:
-            if d:
-                p = os.path.normpath(os.path.join(d, ffmpeg_exe))
-                if os.path.isfile(p):
-                    return p
     return ffmpeg_exe
 class AudioEngine:
     def __init__(self):
@@ -437,28 +409,42 @@ class AudioEngine:
                     if download_done_cb:
                         download_done_cb()
                 elif t == 'done':
-                    # Companion finished inference — convert WAVs to MP3 here
+                    # Companion finished inference — convert WAVs to MP3 using pedalboard
+                    # (avoids ffmpeg subprocess which Gatekeeper blocks on unsigned apps)
+                    from pedalboard.io import AudioFile
+                    import mutagen.id3 as _id3
+                    import mutagen.mp3 as _mp3
+
                     dry_wav   = msg.get('dry_wav')
                     noise_wav = msg.get('noise_wav')
                     tmp_dir   = msg.get('tmp_dir')
-                    ffmpeg    = get_ffmpeg_path()
 
                     os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-                    subprocess.run(
-                        [ffmpeg, '-y',
-                         '-i', dry_wav, '-i', str(source_path),
-                         '-map', '0:a:0', '-map', '1:v:0?', '-map_metadata', '1',
-                         '-c:v', 'copy', '-codec:a', 'libmp3lame', '-q:a', '0',
-                         '-id3v2_version', '3', str(dest_path)],
-                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    with AudioFile(dry_wav) as f:
+                        audio = f.read(f.frames)
+                        sr    = f.samplerate
+                    with AudioFile(str(dest_path), 'w', samplerate=sr,
+                                   num_channels=audio.shape[0], quality=0.0) as f:
+                        f.write(audio)
+
+                    # Copy ID3 tags from source to denoised file
+                    try:
+                        src_tags = _mp3.MP3(str(source_path))
+                        dst_tags = _mp3.MP3(str(dest_path))
+                        if src_tags.tags:
+                            dst_tags.tags = src_tags.tags
+                            dst_tags.save()
+                    except Exception:
+                        pass
 
                     if noise_dest_path and noise_wav:
                         os.makedirs(os.path.dirname(noise_dest_path), exist_ok=True)
-                        subprocess.run(
-                            [ffmpeg, '-y',
-                             '-i', noise_wav,
-                             '-codec:a', 'libmp3lame', '-q:a', '2', str(noise_dest_path)],
-                            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        with AudioFile(noise_wav) as f:
+                            n_audio = f.read(f.frames)
+                            n_sr    = f.samplerate
+                        with AudioFile(str(noise_dest_path), 'w', samplerate=n_sr,
+                                       num_channels=n_audio.shape[0], quality=0.5) as f:
+                            f.write(n_audio)
 
                     if inference_cb:
                         inference_cb(100.0)
@@ -580,23 +566,44 @@ class AudioEngine:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
     def convert_to_mp3(self, source_path, dest_path, normalize=False, lufs=-14.0, volume=1.0):
-        """Transcodes imported wav/flac files to mp3 and optionally normalizes them."""
-        filters = []
-        if normalize: filters.append(f'loudnorm=I={lufs}:TP=-1.0:LRA=11')
-        if volume != 1.0: filters.append(f'volume={volume}')
+        """Transcodes imported wav/flac/mp3 files to mp3 using pedalboard (no ffmpeg)."""
+        from pedalboard.io import AudioFile
+        import pyloudnorm as pyln
+        import mutagen
 
-        cmd = [get_ffmpeg_path(), '-y', '-i', str(source_path)]
-        if filters: cmd.extend(['-af', ','.join(filters)])
-        cmd.extend([
-            '-map', '0:a:0',
-            '-map', '0:v:0?',
-            '-map_metadata', '0',
-            '-c:v', 'copy',
-            '-codec:a', 'libmp3lame', '-q:a', '0', 
-            '-id3v2_version', '3',
-            str(dest_path)
-        ])
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        with AudioFile(str(source_path)) as f:
+            audio = f.read(f.frames)   # shape: (channels, samples)
+            sr    = f.samplerate
+
+        if volume != 1.0:
+            audio = audio * volume
+
+        if normalize:
+            meter   = pyln.Meter(sr)
+            # pyloudnorm expects (samples, channels)
+            loudness = meter.integrated_loudness(audio.T)
+            if loudness > -70:  # skip if silence
+                audio = pyln.normalize.loudness(audio.T, loudness, lufs).T
+
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        with AudioFile(str(dest_path), 'w', samplerate=sr,
+                       num_channels=audio.shape[0], quality='V0') as f:
+            f.write(audio)
+
+        # Copy tags + artwork from source using mutagen
+        try:
+            src = mutagen.File(str(source_path))
+            dst = mutagen.File(str(dest_path))
+            if src and dst and src.tags:
+                # Copy cover art
+                for tag in list(src.tags.keys()):
+                    try:
+                        dst.tags[tag] = src.tags[tag]
+                    except Exception:
+                        pass
+                dst.save()
+        except Exception:
+            pass
 
     def render_export_track(self, source_path, dest_path, normalize=False, quality_flag="0", lufs=-14.0, volume=1.0):
         """Render using Pedalboard for 1:1 sonic parity, then FFmpeg for final encode/normalize."""
@@ -643,29 +650,39 @@ class AudioEngine:
         if volume != 1.0:
             data *= volume
 
-        # 5. Write to a temporary WAV file for FFmpeg to encode/normalize
-        temp_fd, temp_path = tempfile.mkstemp(suffix='.wav')
-        os.close(temp_fd)
-        
+        # 5. Loudnorm + encode to MP3 using pedalboard (no ffmpeg subprocess)
+        from pedalboard.io import AudioFile
+        import pyloudnorm as pyln
+        import mutagen
+
+        if normalize:
+            meter    = pyln.Meter(sr)
+            loudness = meter.integrated_loudness(data)
+            if loudness > -70:
+                data = pyln.normalize.loudness(data, loudness, lufs)
+
+        # Map ffmpeg -q:a 0-9 → pedalboard VBR quality string
+        quality_map = {'0': 'V0', '1': 'V1', '2': 'V2', '3': 'V3',
+                       '4': 'V4', '5': 'V5', '6': 'V6', '7': 'V7',
+                       '8': 'V8', '9': 'V9'}
+        pb_quality = quality_map.get(str(quality_flag), 'V0')
+
+        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+        audio_out = np.clip(data, -1.0, 1.0).T  # (channels, samples)
+        with AudioFile(str(dest_path), 'w', samplerate=sr,
+                       num_channels=audio_out.shape[0], quality=pb_quality) as f:
+            f.write(audio_out)
+
+        # Copy tags + artwork from source
         try:
-            sf.write(temp_path, data, sr)
-
-            filters = []
-            if normalize: filters.append(f'loudnorm=I={lufs}:TP=-1.0:LRA=11')
-
-            cmd = [get_ffmpeg_path(), '-y', '-i', str(temp_path), '-i', str(source_path)]
-            if filters: cmd.extend(['-af', ','.join(filters)])
-            cmd.extend([
-                '-map', '0:a:0',
-                '-map', '1:v:0?',
-                '-map_metadata', '1',
-                '-c:v', 'copy',
-                '-codec:a', 'libmp3lame', '-q:a', str(quality_flag), 
-                '-id3v2_version', '3',
-                str(dest_path)
-            ])
-            
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+            src_tags = mutagen.File(str(source_path))
+            dst_tags = mutagen.File(str(dest_path))
+            if src_tags and dst_tags and src_tags.tags:
+                for tag in list(src_tags.tags.keys()):
+                    try:
+                        dst_tags.tags[tag] = src_tags.tags[tag]
+                    except Exception:
+                        pass
+                dst_tags.save()
+        except Exception:
+            pass

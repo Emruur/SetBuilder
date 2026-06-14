@@ -17,7 +17,7 @@ a = Analysis(
         'sounddevice', 'soundfile', 'pedalboard', 'mutagen',
         'PIL', 'librosa', 'tkinter', 'tkinter.filedialog',
         'tkinter.messagebox', 'tkinter.simpledialog', 'tkinterdnd2',
-        'soundfile_build',
+        'soundfile_build', 'pyloudnorm',
     ],
     hookspath=[],
     runtime_hooks=[],
