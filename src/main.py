@@ -8,6 +8,7 @@ import random
 import tkinter as tk
 from tkinter import messagebox, ttk, filedialog
 from difflib import SequenceMatcher
+import numpy as np
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -21,7 +22,7 @@ from AudioCore import AudioEngine
 from ProjectManager import ProjectState
 from PIL import Image, ImageTk, ImageOps, ImageEnhance
 
-from constants import BG_MAIN, BG_LIST, FG_TEXT, BTN_NORMAL, BTN_HOVER, HIGHLIGHT, BORDER, VINYL_SIZE, CENTER_HOLE
+from constants import BG_MAIN, BG_LIST, FG_TEXT, BTN_NORMAL, BTN_HOVER, HIGHLIGHT, BORDER, VINYL_SIZE, CENTER_HOLE, DENOISER_DOWNLOAD_URL, DENOISER_INSTALL_DIR
 from ui_components import create_btn, create_group_frame, Knob, Timeline
 from export_dialog import ExportDialog
 from vinyl_animator import VinylAnimator
@@ -58,9 +59,14 @@ class DJAppUI:
         self._undo_stack = []
         self._redo_stack = []
 
-        self._importing_count = 0
+        # Unified background-task queue
+        self._tasks = {}       # task_id -> {'label': str}
+        self._task_order = []  # insertion order for display priority
         self._spinner_idx = 0
         self._spinner_job = None
+        self._denoising_indices = set()  # track indices currently queued or processing
+        self.denoise_mix_var = tk.DoubleVar(value=100.0)
+        self._saved_denoise_state = False  # denoise state saved before master bypass
 
         self._drop_leave_timer = None
 
@@ -92,14 +98,25 @@ class DJAppUI:
                 except Exception:
                     pass
 
-    def start_import_spinner(self, total):
-        self._importing_count = total
+    # ── Task queue ──────────────────────────────────────────────────────────
+
+    def _enqueue_task(self, task_id, label):
+        self._tasks[task_id] = {'label': label}
+        self._task_order.append(task_id)
         if self._spinner_job is None:
             self._tick_spinner()
 
-    def update_import_spinner(self, remaining):
-        self._importing_count = remaining
-        if remaining == 0:
+    def _update_task_label(self, task_id, label):
+        if task_id in self._tasks:
+            self._tasks[task_id]['label'] = label
+
+    def _finish_task(self, task_id):
+        self._tasks.pop(task_id, None)
+        try:
+            self._task_order.remove(task_id)
+        except ValueError:
+            pass
+        if not self._tasks:
             if self._spinner_job:
                 self.root.after_cancel(self._spinner_job)
                 self._spinner_job = None
@@ -108,8 +125,24 @@ class DJAppUI:
     def _tick_spinner(self):
         frames = ['⣾', '⣽', '⣻', '⢿', '⡿', '⣟', '⣯', '⣷']
         f = frames[self._spinner_idx % len(frames)]
-        n = self._importing_count
-        self._spinner_lbl.config(text=f"{f}  {n} track{'s' if n != 1 else ''} importing")
+
+        if self._task_order and self._tasks:
+            primary = self._tasks.get(self._task_order[0])
+            if primary:
+                waiting = len(self._tasks) - 1
+                text = f"{f}  {primary['label']}"
+                if waiting > 0:
+                    text += f"  ·  {waiting} waiting"
+                self._spinner_lbl.config(text=text)
+
+        # Animate rack spinner when selected track is being denoised
+        if self._denoising_indices and hasattr(self, '_dr_spinner_lbl'):
+            if self.get_selected_idx() in self._denoising_indices:
+                try:
+                    self._dr_spinner_lbl.config(text=f"{f}  Processing…")
+                except tk.TclError:
+                    pass
+
         self._spinner_idx += 1
         self._spinner_job = self.root.after(80, self._tick_spinner)
 
@@ -236,22 +269,60 @@ class DJAppUI:
         self.left_canvas.bind("<Configure>", _update_scrollregion)
         self.left_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         
-        # Enable cross-platform mouse wheel scrolling over the effect rack
-        def _on_mousewheel(event):
+        # Enable cross-platform mouse wheel scrolling over the effect rack.
+        # Throttle to one repaint per ~16ms (≈60fps) so trackpad bursts don't
+        # queue hundreds of expensive child-widget repositions.
+        _scroll_acc   = [0.0]
+        _scroll_pend  = [False]
+        self._last_scroll_t = [0.0]   # shared with animation timer
+
+        def _flush_scroll():
+            _scroll_pend[0] = False
+            delta = _scroll_acc[0];  _scroll_acc[0] = 0.0
+            if delta == 0.0: return
             req_h = left_inner.winfo_reqheight()
             canv_h = self.left_canvas.winfo_height()
-            if req_h > canv_h: # Only scroll if content is taller than canvas
-                if hasattr(event, 'num') and event.num == 4: self.left_canvas.yview_scroll(-1, "units")
-                elif hasattr(event, 'num') and event.num == 5: self.left_canvas.yview_scroll(1, "units")
-                else: self.left_canvas.yview_scroll(int(-1*(event.delta/120)), "units")
-        def _bind_mousewheel(event):
-            self.left_canvas.bind_all("<MouseWheel>", _on_mousewheel)
-            self.left_canvas.bind_all("<Button-4>", _on_mousewheel)
-            self.left_canvas.bind_all("<Button-5>", _on_mousewheel)
-        def _unbind_mousewheel(event):
-            for seq in ("<MouseWheel>", "<Button-4>", "<Button-5>"): self.left_canvas.unbind_all(seq)
-        self.left_canvas.bind('<Enter>', _bind_mousewheel)
-        self.left_canvas.bind('<Leave>', _unbind_mousewheel)
+            if req_h <= canv_h: return
+            self._last_scroll_t[0] = time.monotonic()
+            top, _ = self.left_canvas.yview()
+            self.left_canvas.yview_moveto(
+                max(0.0, min(1.0, top - delta / (req_h * 2.5))))
+
+        def _on_mousewheel(event):
+            # Only act when the cursor is actually over the DSP rack canvas.
+            # Position-check avoids interfering with the setlist Treeview.
+            try:
+                mx, my = self.root.winfo_pointerx(), self.root.winfo_pointery()
+                lx, ly = self.left_canvas.winfo_rootx(), self.left_canvas.winfo_rooty()
+                if not (lx <= mx <= lx + self.left_canvas.winfo_width() and
+                        ly <= my <= ly + self.left_canvas.winfo_height()):
+                    return
+            except tk.TclError:
+                return
+            req_h = left_inner.winfo_reqheight()
+            if req_h <= self.left_canvas.winfo_height(): return
+            if hasattr(event, 'num') and event.num in (4, 5):
+                _scroll_acc[0] += -120 if event.num == 4 else 120
+            else:
+                _scroll_acc[0] += event.delta
+            if not _scroll_pend[0]:
+                _scroll_pend[0] = True
+                self.left_canvas.after(16, _flush_scroll)
+
+        # Recursively bind to every widget inside the rack so instance bindings
+        # fire before any class-level binding that might swallow the event.
+        def _bind_rack_scroll(w):
+            try:
+                w.bind("<MouseWheel>", _on_mousewheel, add="+")
+                w.bind("<Button-4>",   _on_mousewheel, add="+")
+                w.bind("<Button-5>",   _on_mousewheel, add="+")
+            except tk.TclError:
+                pass
+            for child in w.winfo_children():
+                _bind_rack_scroll(child)
+
+        self._bind_rack_scroll = _bind_rack_scroll  # expose so VST add can call it
+        self.root.after(200, lambda: _bind_rack_scroll(dsp_container))
 
         self.dsp_vars = {}
         self.rack_modules = {}
@@ -271,12 +342,14 @@ class DJAppUI:
         tk.Label(rack_header, text="Power", bg=BG_LIST, fg=FG_TEXT, font=("Helvetica", 8)).pack(side=tk.RIGHT)
         
         def toggle_master(*args):
+            new_bypass = not self.dsp_vars['master_bypass'].get()
             self._master_user_toggled = True
             try:
-                self.dsp_vars['master_bypass'].set(not self.dsp_vars['master_bypass'].get())
+                self.dsp_vars['master_bypass'].set(new_bypass)
                 self.on_dsp_change()
             finally:
                 self._master_user_toggled = False
+            self._on_master_bypass_toggle(new_bypass)
 
         def draw_master(*args):
             master_btn_canvas.delete("all")
@@ -290,6 +363,9 @@ class DJAppUI:
         master_btn_canvas.bind("<Map>", draw_master)
         self.dsp_vars['master_bypass'].trace_add("write", draw_master)
         draw_master()
+
+        # DENOISE MODULE (top of rack, same width as other modules)
+        self._build_denoise_rack(rack_outer_frame)
 
         # FIXED LIMITER MODULE (Always Top)
         limiter_frame = tk.Frame(rack_outer_frame, bg=BG_MAIN, highlightbackground=BORDER, highlightthickness=1)
@@ -395,16 +471,18 @@ class DJAppUI:
         self.rack_body = tk.Frame(rack_outer_frame, bg=BG_MAIN)
         self.rack_body.pack(fill=tk.X, pady=5)
 
-        # 1. EQ Module
+        # 1. EQ Module (Graph)
         self.dsp_vars['eq_bypass'] = tk.BooleanVar(value=True)
         self.dsp_vars['eq_low'] = tk.DoubleVar(value=0.0)
         self.dsp_vars['eq_mid'] = tk.DoubleVar(value=0.0)
         self.dsp_vars['eq_high'] = tk.DoubleVar(value=0.0)
-        self.rack_modules['eq'] = self.create_plugin_module(self.rack_body, "EQ", 'eq', self.dsp_vars['eq_bypass'], [
-            ("High", self.dsp_vars['eq_high'], -15.0, 15.0),
-            ("Mid", self.dsp_vars['eq_mid'], -15.0, 15.0),
-            ("Low", self.dsp_vars['eq_low'], -15.0, 15.0)
-        ])
+        self.dsp_vars['eq_low_freq'] = tk.DoubleVar(value=250.0)
+        self.dsp_vars['eq_mid_freq'] = tk.DoubleVar(value=1000.0)
+        self.dsp_vars['eq_high_freq'] = tk.DoubleVar(value=4000.0)
+        self.dsp_vars['eq_low_q'] = tk.DoubleVar(value=0.707)
+        self.dsp_vars['eq_mid_q'] = tk.DoubleVar(value=1.0)
+        self.dsp_vars['eq_high_q'] = tk.DoubleVar(value=0.707)
+        self.rack_modules['eq'] = self.create_graph_eq_module(self.rack_body)
 
         # 2. Dynamics Module
         self.dsp_vars['dyn_bypass'] = tk.BooleanVar(value=True)
@@ -708,6 +786,8 @@ class DJAppUI:
         self.rack_modules[mod_id] = self.create_vst_module(self.rack_body, name, mod_id, self.dsp_vars['vsts'][mod_id]['bypass'])
         self.render_rack_order()
         self.on_dsp_change()
+        if hasattr(self, '_bind_rack_scroll'):
+            self.root.after(50, lambda: self._bind_rack_scroll(self.rack_body))
 
     def move_module(self, module_id, direction):
         order = self.dsp_vars.get('chain_order', ['eq', 'dyn'])
@@ -813,6 +893,281 @@ class DJAppUI:
         bypass_var.trace_add("write", draw_btn)
         draw_btn_cb = self.dsp_vars['master_bypass'].trace_add("write", draw_btn)
         draw_btn()
+        return f
+
+    def create_graph_eq_module(self, parent):
+        SR = 44100.0
+        GAIN_MAX = 15.0
+        HR = 5
+        FLIM = {'low': (20, 2000), 'mid': (100, 8000), 'high': (1000, 20000)}
+
+        f = tk.Frame(parent, bg=BG_MAIN, highlightbackground=BORDER, highlightthickness=1)
+
+        # ── Header (order ▲▼ | EQ | [LOW ⊙freq ⊙Q] | Power ●) ─────────────
+        header = tk.Frame(f, bg=BG_LIST)
+        header.pack(fill=tk.X)
+        order_frame = tk.Frame(header, bg=BG_LIST)
+        order_frame.pack(side=tk.LEFT, padx=(5, 0))
+        for arrow, d in [("▲", 1), ("▼", -1)]:
+            lbl = tk.Label(order_frame, text=arrow, bg=BG_LIST, fg=FG_TEXT, font=("Helvetica", 7), cursor="hand2")
+            lbl.pack(side=tk.TOP)
+            lbl.bind("<Button-1>", lambda e, _d=d: self.move_module('eq', _d))
+        title_lbl = tk.Label(header, text="EQ", bg=BG_LIST, fg="#555555", font=("Helvetica", 9, "bold"))
+        title_lbl.pack(side=tk.LEFT, padx=(5, 0))
+        bypass_c = tk.Canvas(header, width=16, height=16, bg=BG_LIST, highlightthickness=0, cursor="hand2")
+        bypass_c.pack(side=tk.RIGHT, padx=(0, 8), pady=4)
+        tk.Label(header, text="Power", bg=BG_LIST, fg=FG_TEXT, font=("Helvetica", 8)).pack(side=tk.RIGHT)
+
+        # Inline band info — lives in the header, hidden until a handle is grabbed
+        _freq_proxy = tk.DoubleVar(value=250.0)
+        _q_proxy    = tk.DoubleVar(value=0.707)
+        _active     = {'band': None}
+
+        info_inline = tk.Frame(header, bg=BG_LIST)
+
+        freq_knob = Knob(info_inline, _freq_proxy, 20, 2000, size=26, pill=True)
+        freq_knob.pack(side=tk.LEFT, padx=(6, 2))
+        freq_lbl = tk.Label(info_inline, text="250Hz", bg=BG_LIST, fg="#888888",
+                             font=("Courier", 7), width=5, anchor='w')
+        freq_lbl.pack(side=tk.LEFT, padx=(0, 4))
+
+        q_knob = Knob(info_inline, _q_proxy, 0.1, 4.0, size=26, pill=True)
+        q_knob.pack(side=tk.LEFT, padx=(0, 2))
+        q_lbl = tk.Label(info_inline, text="Q0.71", bg=BG_LIST, fg="#888888",
+                          font=("Courier", 7), width=5, anchor='w')
+        q_lbl.pack(side=tk.LEFT)
+
+        def _fmt_freq(f):
+            return f"{f:.0f}Hz" if f < 1000 else f"{f/1000:.1f}k"
+
+        def _on_proxy_change(*_):
+            if not _active['band']: return
+            band = _active['band']
+            nf = round(_freq_proxy.get(), 1)
+            nq = round(_q_proxy.get(), 3)
+            self.dsp_vars[f'eq_{band}_freq'].set(nf)
+            self.dsp_vars[f'eq_{band}_q'].set(nq)
+            freq_lbl.config(text=_fmt_freq(nf))
+            q_lbl.config(text=f"Q{nq:.2f}")
+            self.on_dsp_change()
+            draw()
+
+        _freq_proxy.trace_add('write', _on_proxy_change)
+        _q_proxy.trace_add('write', _on_proxy_change)
+
+        def _set_active(band):
+            _active['band'] = band
+            if band is None:
+                info_inline.pack_forget()
+                return
+            fmin, fmax = FLIM[band]
+            freq_knob.from_ = fmin
+            freq_knob.to_   = fmax
+            fv = self.dsp_vars[f'eq_{band}_freq'].get()
+            qv = self.dsp_vars[f'eq_{band}_q'].get()
+            _freq_proxy.set(fv)
+            _q_proxy.set(qv)
+            freq_lbl.config(text=_fmt_freq(fv))
+            q_lbl.config(text=f"Q{qv:.2f}")
+            freq_knob.draw()
+            if not info_inline.winfo_manager():
+                info_inline.pack(side=tk.LEFT, padx=(4, 0))
+
+        # ── EQ Graph canvas ──────────────────────────────────────────────────
+        cv = tk.Canvas(f, bg=BG_MAIN, height=58, highlightthickness=0, cursor="crosshair")
+        cv.pack(fill=tk.X, padx=4, pady=(3, 4))
+
+        drag = {'band': None, 'y0': 0, 'g0': 0.0, 'gvar': None, 'fvar': None, 'fmin': 20, 'fmax': 20000}
+
+        def freq_to_x(freq, w):
+            return (np.log10(max(freq, 1)) - np.log10(20.0)) / (np.log10(20000.0) - np.log10(20.0)) * w
+
+        def x_to_freq(x, w, fmin, fmax):
+            lo, hi = np.log10(20.0), np.log10(20000.0)
+            return float(np.clip(10 ** (lo + x / w * (hi - lo)), fmin, fmax))
+
+        def gain_to_y(g, h):
+            return h / 2.0 - g / GAIN_MAX * (h / 2.0 - 6)
+
+        def biquad_db(freqs, b0, b1, b2, a0, a1, a2):
+            w = 2 * np.pi * freqs / SR
+            e = np.exp(1j * w)
+            H = (b0 + b1/e + b2/e**2) / (a0 + a1/e + a2/e**2)
+            return 20 * np.log10(np.maximum(np.abs(H), 1e-10))
+
+        def low_shelf(freqs, g, fc, q):
+            if abs(g) < 0.01: return np.zeros(len(freqs))
+            A = 10**(g/40); w0 = 2*np.pi*fc/SR
+            cw, sqA = np.cos(w0), np.sqrt(A)
+            al = np.sin(w0) / (2 * max(q, 0.01))
+            return biquad_db(freqs,
+                A*((A+1)-(A-1)*cw+2*sqA*al), 2*A*((A-1)-(A+1)*cw), A*((A+1)-(A-1)*cw-2*sqA*al),
+                (A+1)+(A-1)*cw+2*sqA*al, -2*((A-1)+(A+1)*cw), (A+1)+(A-1)*cw-2*sqA*al)
+
+        def peak(freqs, g, fc, q):
+            if abs(g) < 0.01: return np.zeros(len(freqs))
+            A = 10**(g/40); w0 = 2*np.pi*fc/SR
+            cw, al = np.cos(w0), np.sin(w0) / (2 * max(q, 0.01))
+            return biquad_db(freqs, 1+al*A, -2*cw, 1-al*A, 1+al/A, -2*cw, 1-al/A)
+
+        def high_shelf(freqs, g, fc, q):
+            if abs(g) < 0.01: return np.zeros(len(freqs))
+            A = 10**(g/40); w0 = 2*np.pi*fc/SR
+            cw, sqA = np.cos(w0), np.sqrt(A)
+            al = np.sin(w0) / (2 * max(q, 0.01))
+            return biquad_db(freqs,
+                A*((A+1)+(A-1)*cw+2*sqA*al), -2*A*((A-1)+(A+1)*cw), A*((A+1)+(A-1)*cw-2*sqA*al),
+                (A+1)-(A-1)*cw+2*sqA*al, 2*((A-1)-(A+1)*cw), (A+1)-(A-1)*cw-2*sqA*al)
+
+        N_BANDS = 28
+
+        def draw(*_):
+            cv.delete("all")
+            w, h = cv.winfo_width(), cv.winfo_height()
+            if w < 20 or h < 20: return
+            bypassed = self.dsp_vars['eq_bypass'].get() or self.dsp_vars['master_bypass'].get()
+
+            # ── Spectrum (background layer) ──────────────────────────────────
+            buf = self.audio.spectrum_buffer.copy()
+            if np.abs(buf).max() > 1e-6:
+                win_fn = np.hanning(len(buf))
+                mag = np.abs(np.fft.rfft(buf * win_fn))
+                fft_freqs = np.fft.rfftfreq(len(buf), 1.0 / SR)
+                edges = np.logspace(np.log10(20), np.log10(20000), N_BANDS + 1)
+                for i in range(N_BANDS):
+                    mask = (fft_freqs >= edges[i]) & (fft_freqs < edges[i+1])
+                    if not mask.any(): continue
+                    db = 20 * np.log10(max(mag[mask].mean() / len(buf), 1e-10)) + 72
+                    bar_h = max(0, min(h, db / 72 * h * 0.85))
+                    x0 = freq_to_x(edges[i],   w) + 1
+                    x1 = freq_to_x(edges[i+1], w) - 1
+                    if x1 > x0 and bar_h > 0:
+                        cv.create_rectangle(x0, h - bar_h, x1, h, fill="#1a2e1a", outline="")
+
+            y0 = gain_to_y(0, h)
+            cv.create_line(0, y0, w, y0, fill="#333333")
+            for gf, lbl in [(100, "100"), (1000, "1k"), (10000, "10k")]:
+                gx = freq_to_x(gf, w)
+                cv.create_line(gx, 0, gx, h, fill="#252525")
+                cv.create_text(gx+2, h-1, text=lbl, fill="#404040", font=("Helvetica", 6), anchor='sw')
+
+            freqs = np.logspace(np.log10(20), np.log10(20000), w)
+            total = np.clip(
+                low_shelf(freqs,  self.dsp_vars['eq_low'].get(),  self.dsp_vars['eq_low_freq'].get(),  self.dsp_vars['eq_low_q'].get()) +
+                peak(freqs,       self.dsp_vars['eq_mid'].get(),  self.dsp_vars['eq_mid_freq'].get(),  self.dsp_vars['eq_mid_q'].get()) +
+                high_shelf(freqs, self.dsp_vars['eq_high'].get(), self.dsp_vars['eq_high_freq'].get(), self.dsp_vars['eq_high_q'].get()),
+                -GAIN_MAX*1.5, GAIN_MAX*1.5)
+            pts = [c for i in range(w) for c in (i, gain_to_y(total[i], h))]
+            if len(pts) >= 4:
+                cv.create_line(*pts, fill="#444444" if bypassed else HIGHLIGHT, width=1.5, smooth=True)
+
+            hcol = "#444444" if bypassed else HIGHLIGHT
+            for band, gvar, fvar in [
+                ('low',  self.dsp_vars['eq_low'],  self.dsp_vars['eq_low_freq']),
+                ('mid',  self.dsp_vars['eq_mid'],  self.dsp_vars['eq_mid_freq']),
+                ('high', self.dsp_vars['eq_high'], self.dsp_vars['eq_high_freq']),
+            ]:
+                hx = freq_to_x(fvar.get(), w)
+                hy = gain_to_y(gvar.get(), h)
+                active_band = band == _active['band']
+                if bypassed:
+                    fill = "#444444"
+                elif active_band:
+                    fill = "#ffffff"
+                else:
+                    fill = HIGHLIGHT
+                cv.create_oval(hx-HR, hy-HR, hx+HR, hy+HR, fill=fill, outline=BG_MAIN, width=1.5)
+
+        def on_press(e):
+            w, h = cv.winfo_width(), cv.winfo_height()
+            bands = [
+                ('low',  self.dsp_vars['eq_low'],  self.dsp_vars['eq_low_freq'],  *FLIM['low']),
+                ('mid',  self.dsp_vars['eq_mid'],  self.dsp_vars['eq_mid_freq'],  *FLIM['mid']),
+                ('high', self.dsp_vars['eq_high'], self.dsp_vars['eq_high_freq'], *FLIM['high']),
+            ]
+            best, closest = None, 18
+            for band, gvar, fvar, fmin, fmax in bands:
+                hx = freq_to_x(fvar.get(), w)
+                hy = gain_to_y(gvar.get(), h)
+                d = ((e.x-hx)**2 + (e.y-hy)**2)**0.5
+                if d < closest:
+                    closest, best = d, (band, gvar, fvar, fmin, fmax)
+            if best:
+                drag['band'] = best[0]
+                drag['gvar'], drag['fvar'] = best[1], best[2]
+                drag['fmin'], drag['fmax'] = best[3], best[4]
+                drag['y0'], drag['g0'] = e.y, best[1].get()
+                _set_active(best[0])
+
+        def on_drag(e):
+            if not drag['band']: return
+            w, h = cv.winfo_width(), cv.winfo_height()
+            dy = e.y - drag['y0']
+            new_g = max(-GAIN_MAX, min(GAIN_MAX, drag['g0'] - dy * GAIN_MAX / (h/2 - 6)))
+            drag['gvar'].set(round(new_g, 1))
+            new_f = x_to_freq(e.x, w, drag['fmin'], drag['fmax'])
+            drag['fvar'].set(round(new_f, 1))
+            # Sync proxy so info row stays live
+            _active['band'] = None  # suppress feedback loop
+            _freq_proxy.set(round(new_f, 1))
+            freq_lbl.config(text=_fmt_freq(new_f))
+            _active['band'] = drag['band']
+            self.on_dsp_change()
+            draw()
+
+        def on_release(e):
+            drag['band'] = None
+
+        cv.bind('<ButtonPress-1>', on_press)
+        cv.bind('<B1-Motion>', on_drag)
+        cv.bind('<ButtonRelease-1>', on_release)
+        cv.bind('<Configure>', lambda e: cv.after(10, draw))
+
+        for v in [self.dsp_vars['eq_low'], self.dsp_vars['eq_mid'], self.dsp_vars['eq_high'],
+                  self.dsp_vars['eq_low_freq'], self.dsp_vars['eq_mid_freq'], self.dsp_vars['eq_high_freq'],
+                  self.dsp_vars['eq_low_q'], self.dsp_vars['eq_mid_q'], self.dsp_vars['eq_high_q'],
+                  self.dsp_vars['eq_bypass'], self.dsp_vars['master_bypass']]:
+            v.trace_add('write', draw)
+
+        # ── Spectrum animation timer — pauses during scroll to avoid stutter ─
+        def _animate():
+            try:
+                if not cv.winfo_exists():
+                    return
+                if time.monotonic() - self._last_scroll_t[0] > 0.2:
+                    draw()
+                cv.after(150, _animate)
+            except tk.TclError:
+                pass
+
+        cv.after(400, _animate)
+
+        # ── Bypass button ────────────────────────────────────────────────────
+        def toggle_bypass(e):
+            self._user_toggling_bypass = True
+            try:
+                self.dsp_vars['eq_bypass'].set(not self.dsp_vars['eq_bypass'].get())
+                self.on_dsp_change()
+            finally:
+                self._user_toggling_bypass = False
+
+        def draw_btn(*_):
+            try:
+                if not bypass_c.winfo_exists(): return
+                bypass_c.delete("all")
+                active = not self.dsp_vars['eq_bypass'].get() and not self.dsp_vars['master_bypass'].get()
+                bypass_c.create_oval(2,2,14,14, fill="#ffd700" if active else BG_LIST,
+                                     outline="#ffd700" if active else "#888888", width=1.5)
+                title_lbl.config(fg=FG_TEXT if active else "#555555")
+            except tk.TclError: pass
+
+        bypass_c.bind("<Button-1>", toggle_bypass)
+        bypass_c.bind("<Map>", draw_btn)
+        self.dsp_vars['eq_bypass'].trace_add("write", draw_btn)
+        self.dsp_vars['master_bypass'].trace_add("write", draw_btn)
+        draw_btn()
+        f.after(80, draw)
+        f.after(100, lambda: _set_active('low'))
         return f
 
     def create_plugin_module(self, parent, title, module_id, bypass_var, parameters):
@@ -965,6 +1320,8 @@ class DJAppUI:
             'chain_order': self.dsp_vars['chain_order'].copy(),
             'eq_bypass': self.dsp_vars['eq_bypass'].get(),
             'eq_low': self.dsp_vars['eq_low'].get(), 'eq_mid': self.dsp_vars['eq_mid'].get(), 'eq_high': self.dsp_vars['eq_high'].get(),
+            'eq_low_freq': self.dsp_vars['eq_low_freq'].get(), 'eq_mid_freq': self.dsp_vars['eq_mid_freq'].get(), 'eq_high_freq': self.dsp_vars['eq_high_freq'].get(),
+            'eq_low_q': self.dsp_vars['eq_low_q'].get(), 'eq_mid_q': self.dsp_vars['eq_mid_q'].get(), 'eq_high_q': self.dsp_vars['eq_high_q'].get(),
             'dyn_bypass': self.dsp_vars['dyn_bypass'].get(),
             'dyn_threshold': self.dsp_vars['dyn_threshold'].get(), 'dyn_ratio': self.dsp_vars['dyn_ratio'].get(), 'dyn_attack': self.dsp_vars['dyn_attack'].get(), 'dyn_release': self.dsp_vars['dyn_release'].get(), 'dyn_makeup': self.dsp_vars['dyn_makeup'].get(),
             'limiter_bypass': self.dsp_vars['limiter_bypass'].get(), 'limiter_softclip': self.dsp_vars['limiter_softclip'].get(),
@@ -1114,6 +1471,347 @@ class DJAppUI:
             self.vinyl_animator.update_artwork(None)
         self._refresh_sort_btn()
         self.update_set_length_labels()
+        self._update_denoise_rack(self.project.tracks[idx] if idx is not None else None)
+
+    # ── Denoise ─────────────────────────────────────────────────────────────
+
+    # ── Master bypass ↔ denoise sync ────────────────────────────────────────
+
+    def _on_master_bypass_toggle(self, bypassing):
+        """Called after the effect-rack master power button is toggled."""
+        idx = self.get_selected_idx()
+        if idx is None:
+            return
+        track = self.project.tracks[idx]
+        pos = self.audio.get_pos() / 1000.0 if self.audio.current_track == track['filename'] else 0.0
+        was_playing = self.audio.current_track == track['filename'] and not self.audio.is_paused
+
+        if bypassing:
+            # Save denoise state and turn it off alongside the rack
+            self._saved_denoise_state = track.get('use_denoised', False)
+            if track.get('use_denoised'):
+                track['use_denoised'] = False
+                self._update_denoise_rack(track)
+                self.project.needs_save = True
+                if self.audio.current_track == track['filename']:
+                    play_path = os.path.join(self.project.current_folder, self._get_playback_filename(track))
+                    self.audio.play_from(play_path, pos, volume=track.get('volume', 100.0) / 100.0)
+                    if not was_playing:
+                        self.audio.toggle_pause()
+        else:
+            # Restore denoise state saved before bypass
+            if self._saved_denoise_state and track.get('denoised_filename'):
+                track['use_denoised'] = True
+                self._update_denoise_rack(track)
+                self.project.needs_save = True
+                if self.audio.current_track == track['filename']:
+                    play_path = os.path.join(self.project.current_folder, self._get_playback_filename(track))
+                    noise_p, d_mix = self._get_noise_play_args(track)
+                    self.audio.play_from(play_path, pos, volume=track.get('volume', 100.0) / 100.0,
+                                         noise_path=noise_p, denoise_mix=d_mix)
+                    if not was_playing:
+                        self.audio.toggle_pause()
+            self._saved_denoise_state = False
+
+    def _activate_rack_if_needed(self):
+        """Turn the effect rack on visually when denoise activates (cosmetic link)."""
+        if self.dsp_vars['master_bypass'].get():
+            self.dsp_vars['master_bypass'].set(False)
+            self.on_dsp_change()
+
+    # ── Denoise helpers ─────────────────────────────────────────────────────
+
+    def _get_playback_filename(self, track):
+        if track.get('use_denoised') and track.get('denoised_filename'):
+            p = os.path.join(self.project.current_folder, track['denoised_filename'])
+            if os.path.exists(p):
+                return track['denoised_filename']
+        return track['filename']
+
+    def _get_noise_play_args(self, track):
+        """Returns (noise_abs_path_or_None, denoise_mix) for play_from."""
+        if track.get('use_denoised') and track.get('noise_filename'):
+            p = os.path.join(self.project.current_folder, track['noise_filename'])
+            if os.path.exists(p):
+                return p, track.get('denoise_mix', 1.0)
+        return None, 1.0
+
+    # ── Denoise rack UI ─────────────────────────────────────────────────────
+
+    def _build_denoise_rack(self, parent):
+        # Single-row module — title | knob NN | Power ●
+        rack = tk.Frame(parent, bg=BG_MAIN, highlightbackground=BORDER, highlightthickness=1)
+        rack.pack(fill=tk.X, padx=5, pady=(0, 5))
+
+        self._dr_title = tk.Label(rack, text="DENOISE", bg=BG_MAIN, fg="#555555",
+                                   font=("Helvetica", 9, "bold"))
+        self._dr_title.pack(side=tk.LEFT, padx=(5, 4), pady=5)
+
+        # Power LED (right side)
+        self._dr_led = tk.Canvas(rack, width=16, height=16, bg=BG_MAIN,
+                                  highlightthickness=0, cursor="hand2")
+        self._dr_led.pack(side=tk.RIGHT, padx=(0, 8), pady=5)
+        tk.Label(rack, text="Power", bg=BG_MAIN, fg=FG_TEXT,
+                 font=("Helvetica", 8)).pack(side=tk.RIGHT, padx=(0, 2))
+        self._dr_led.bind("<Button-1>", lambda e: self.toggle_denoise())
+        self._draw_denoise_led(False)
+
+        # Knob + value (centre, shown when not processing)
+        self._dr_knob_frame = tk.Frame(rack, bg=BG_MAIN)
+        self._dr_knob = Knob(self._dr_knob_frame, self.denoise_mix_var, 0.0, 100.0,
+                              command=self._on_denoise_mix_change, size=22)
+        self._dr_knob.pack(side=tk.LEFT, padx=(0, 2))
+        self._dr_knob.set_disabled(True)
+        self._dr_val_lbl = tk.Label(self._dr_knob_frame, text="100", bg=BG_MAIN,
+                                     fg="#555555", font=("Helvetica", 8), width=3)
+        self._dr_val_lbl.pack(side=tk.LEFT)
+        self._dr_knob_frame.pack(side=tk.LEFT, padx=4)
+        self.denoise_mix_var.trace_add('write', lambda *_: self._dr_val_lbl.config(
+            text=f"{self.denoise_mix_var.get():.0f}"))
+
+        # Spinner (centre, shown during processing)
+        self._dr_spinner_frame = tk.Frame(rack, bg=BG_MAIN)
+        self._dr_spinner_lbl = tk.Label(self._dr_spinner_frame, text="⣾  Processing…",
+                                         bg=BG_MAIN, fg="#888888", font=("Helvetica", 8))
+        self._dr_spinner_lbl.pack(side=tk.LEFT)
+
+    def _draw_denoise_led(self, active):
+        self._dr_led.delete("all")
+        if active:
+            self._dr_led.create_oval(2, 2, 14, 14, fill="#ffd700", outline="#ffd700")
+        else:
+            self._dr_led.create_oval(2, 2, 14, 14, fill=BG_MAIN, outline="#888888", width=1.5)
+
+    def _update_denoise_rack(self, track=None):
+        if not hasattr(self, '_dr_title'):
+            return
+
+        # Determine track index
+        track_idx = None
+        if track is not None:
+            try:
+                track_idx = next(i for i, t in enumerate(self.project.tracks) if t is track)
+            except StopIteration:
+                pass
+
+        processing = (track_idx is not None and track_idx in self._denoising_indices)
+
+        if processing:
+            self._dr_knob_frame.pack_forget()
+            self._dr_spinner_frame.pack(side=tk.LEFT, padx=4)
+            self._dr_title.config(fg=FG_TEXT)
+            self._draw_denoise_led(False)
+            return
+
+        # Not processing — show knob
+        self._dr_spinner_frame.pack_forget()
+        self._dr_knob_frame.pack(side=tk.LEFT, padx=4)
+
+        if track is None or not track.get('denoised_filename'):
+            self._dr_title.config(fg="#555555")
+            self._dr_knob.set_disabled(True)
+            self._dr_val_lbl.config(fg="#555555")
+            self._draw_denoise_led(False)
+        elif track.get('use_denoised', False):
+            self._dr_title.config(fg=FG_TEXT)
+            self._dr_knob.set_disabled(False)
+            self._dr_val_lbl.config(fg="#aaaaaa")
+            self._draw_denoise_led(True)
+            self.denoise_mix_var.set(round(track.get('denoise_mix', 1.0) * 100.0, 1))
+        else:
+            self._dr_title.config(fg="#555555")
+            self._dr_knob.set_disabled(True)
+            self._dr_val_lbl.config(fg="#555555")
+            self._draw_denoise_led(False)
+            self.denoise_mix_var.set(round(track.get('denoise_mix', 1.0) * 100.0, 1))
+
+    def _on_denoise_mix_change(self, *_):
+        idx = self.get_selected_idx()
+        if idx is None:
+            return
+        track = self.project.tracks[idx]
+        if not track.get('use_denoised'):
+            return
+        mix = self.denoise_mix_var.get() / 100.0
+        track['denoise_mix'] = mix
+        self.audio.denoise_mix = mix
+        self.project.needs_save = True
+
+    def toggle_denoise(self):
+        idx = self.get_selected_idx()
+        if idx is None:
+            return
+        if idx in self._denoising_indices:
+            return  # processing in progress
+
+        track = self.project.tracks[idx]
+
+        if not track.get('denoised_filename'):
+            self._start_denoising(idx)
+            return
+
+        was_playing = (self.audio.current_track == track['filename'] and not self.audio.is_paused)
+        pos = self.audio.get_pos() / 1000.0 if self.audio.current_track == track['filename'] else 0.0
+
+        track['use_denoised'] = not track.get('use_denoised', False)
+        self._update_denoise_rack(track)
+        self.project.needs_save = True
+        if track['use_denoised']:
+            self._activate_rack_if_needed()
+
+        if self.audio.current_track == track['filename']:
+            play_path = os.path.join(self.project.current_folder, self._get_playback_filename(track))
+            noise_p, d_mix = self._get_noise_play_args(track)
+            vol = track.get('volume', 100.0) / 100.0
+            self.audio.play_from(play_path, pos, volume=vol, noise_path=noise_p, denoise_mix=d_mix)
+            if not was_playing:
+                self.audio.toggle_pause()
+
+    def _download_and_install_denoiser(self, on_done, on_error):
+        """Download SetBuilderDenoiser.zip, extract to ~/Applications, call on_done() or on_error(msg)."""
+        import urllib.request
+        import zipfile
+
+        install_dir = os.path.expanduser(DENOISER_INSTALL_DIR)
+        os.makedirs(install_dir, exist_ok=True)
+        zip_path = os.path.join(install_dir, '_SetBuilderDenoiser_download.zip')
+
+        dl_task  = 'denoiser_download'
+        ext_task = 'denoiser_extract'
+
+        self._enqueue_task(dl_task, 'Downloading denoiser 0%')
+
+        def worker():
+            try:
+                # --- Download with progress ---
+                with urllib.request.urlopen(DENOISER_DOWNLOAD_URL) as resp:
+                    total = int(resp.headers.get('Content-Length', 0))
+                    done  = 0
+                    chunk = 1024 * 256
+                    with open(zip_path, 'wb') as f:
+                        while True:
+                            buf = resp.read(chunk)
+                            if not buf:
+                                break
+                            f.write(buf)
+                            done += len(buf)
+                            if total:
+                                pct = done / total * 100
+                                self.root.after(0, self._update_task_label, dl_task,
+                                                f'Downloading denoiser {pct:.0f}%')
+                self.root.after(0, self._finish_task, dl_task)
+                self.root.after(0, self._enqueue_task, ext_task, 'Installing denoiser…')
+
+                # --- Extract ---
+                with zipfile.ZipFile(zip_path, 'r') as zf:
+                    zf.extractall(install_dir)
+                os.remove(zip_path)
+
+                self.root.after(0, self._finish_task, ext_task)
+                self.root.after(0, on_done)
+            except Exception as e:
+                self.root.after(0, self._finish_task, dl_task)
+                self.root.after(0, self._finish_task, ext_task)
+                try:
+                    os.remove(zip_path)
+                except OSError:
+                    pass
+                self.root.after(0, on_error, str(e))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _start_denoising(self, idx):
+        companion, is_script = AudioEngine.find_denoiser_companion()
+        if companion is None:
+            # Ask user if they want to download the companion
+            size_mb = 800
+            ok = messagebox.askyesno(
+                "Denoiser Module Required",
+                f"The denoiser module is not installed.\n\n"
+                f"Download and install it now? (~{size_mb} MB)\n\n"
+                f"It will be saved to {DENOISER_INSTALL_DIR} and denoising will start automatically."
+            )
+            if not ok:
+                return
+
+            def on_installed():
+                # Re-run now that the companion is in place
+                self._start_denoising(idx)
+
+            def on_install_error(msg):
+                messagebox.showerror("Download Failed", f"Could not download denoiser:\n\n{msg}")
+
+            self._download_and_install_denoiser(on_installed, on_install_error)
+            return
+
+        track = self.project.tracks[idx]
+        src = os.path.join(self.project.current_folder, track['filename'])
+        dest_rel   = f"denoised/{track['filename']}"
+        noise_rel  = f"denoised/{os.path.splitext(track['filename'])[0]}_noise.mp3"
+        dest       = os.path.join(self.project.current_folder, dest_rel)
+        noise_dest = os.path.join(self.project.current_folder, noise_rel)
+
+        self._denoising_indices.add(idx)
+        self._update_denoise_rack(track)
+
+        model_path    = os.path.join(AudioEngine.denoise_model_dir(), AudioEngine.DENOISE_MODEL)
+        need_download = not os.path.exists(model_path)
+        dl_task_id    = f"dl_model_{idx}"
+        inf_task_id   = f"denoise_{idx}_{id(track)}"
+
+        if need_download:
+            self._enqueue_task(dl_task_id, "Downloading model 0%")
+        else:
+            self._enqueue_task(inf_task_id, "Denoising 0% of track")
+
+        def on_download(pct):
+            self.root.after(0, self._update_task_label, dl_task_id,
+                            f"Downloading model {pct:.0f}%")
+
+        def on_download_done():
+            self.root.after(0, self._finish_task, dl_task_id)
+            self.root.after(0, self._enqueue_task, inf_task_id, "Denoising 0% of track")
+
+        def on_inference(pct):
+            self.root.after(0, self._update_task_label, inf_task_id,
+                            f"Denoised {pct:.0f}% of track")
+
+        def worker():
+            try:
+                AudioEngine.run_denoiser_companion(
+                    companion, is_script,
+                    src, dest, noise_dest_path=noise_dest,
+                    download_cb=on_download if need_download else None,
+                    download_done_cb=on_download_done if need_download else None,
+                    inference_cb=on_inference,
+                )
+                self.root.after(0, self._on_denoising_done, idx, dest_rel, noise_rel, inf_task_id)
+            except Exception as e:
+                if need_download:
+                    self.root.after(0, self._finish_task, dl_task_id)
+                self.root.after(0, self._on_denoising_error, idx, str(e), inf_task_id)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _on_denoising_done(self, idx, dest_rel, noise_rel, task_id):
+        self._denoising_indices.discard(idx)
+        self._finish_task(task_id)
+        if idx < len(self.project.tracks):
+            track = self.project.tracks[idx]
+            track['denoised_filename'] = dest_rel
+            track['noise_filename'] = noise_rel
+            track['use_denoised'] = True
+            track['denoise_mix'] = 1.0
+            self._update_denoise_rack(track)
+            self._activate_rack_if_needed()
+            self.project.needs_save = True
+
+    def _on_denoising_error(self, idx, err, task_id):
+        self._denoising_indices.discard(idx)
+        self._finish_task(task_id)
+        sel = self.get_selected_idx()
+        self._update_denoise_rack(self.project.tracks[sel] if sel is not None else None)
+        messagebox.showerror("Denoise Failed", f"Denoise error:\n\n{err}")
 
     def _refresh_sort_btn(self):
         if not hasattr(self, 'btn_sort_out'): return
@@ -1275,7 +1973,8 @@ class DJAppUI:
         if idx is not None:
             track = self.project.tracks[idx]
             vol = track.get('volume', 100.0) / 100.0
-            self.audio.play_from(os.path.join(self.project.current_folder, track['filename']), target, volume=vol)
+            noise_p, d_mix = self._get_noise_play_args(track)
+            self.audio.play_from(os.path.join(self.project.current_folder, self._get_playback_filename(track)), target, volume=vol, noise_path=noise_p, denoise_mix=d_mix)
             self.seek_offset = target
             self.btn_play_pause.config(text="⏸ Pause")
             self.sync_ui_state()
@@ -1541,7 +2240,8 @@ class DJAppUI:
             if idx is not None:
                 track = self.project.tracks[idx]
                 vol = track.get('volume', 100.0) / 100.0
-                self.audio.play_from(os.path.join(self.project.current_folder, track['filename']), val, volume=vol)
+                noise_p, d_mix = self._get_noise_play_args(track)
+                self.audio.play_from(os.path.join(self.project.current_folder, self._get_playback_filename(track)), val, volume=vol, noise_path=noise_p, denoise_mix=d_mix)
                 self.seek_offset = val
                 self.btn_play_pause.config(text="⏸ Pause")
                 self.sync_ui_state()
@@ -1897,10 +2597,9 @@ class DJAppUI:
             self.vinyl_animator.set_speed(max(1.5, bpm / 35.0))
 
             self.audio.current_track = track['filename']
-
-            # Look how clean this is now!
             vol = track.get('volume', 100.0) / 100.0
-            self.audio.play(os.path.join(self.project.current_folder, track['filename']), volume=vol)
+            noise_p, d_mix = self._get_noise_play_args(track)
+            self.audio.play(os.path.join(self.project.current_folder, self._get_playback_filename(track)), volume=vol, noise_path=noise_p, denoise_mix=d_mix)
             self.btn_play_pause.config(text="⏸ Pause")
             
             if self.update_job: self.root.after_cancel(self.update_job)
@@ -1937,7 +2636,8 @@ class DJAppUI:
             if idx is not None:
                 track = self.project.tracks[idx]
                 vol = track.get('volume', 100.0) / 100.0
-                self.audio.play_from(os.path.join(self.project.current_folder, track['filename']), 0, volume=vol)
+                noise_p, d_mix = self._get_noise_play_args(track)
+                self.audio.play_from(os.path.join(self.project.current_folder, self._get_playback_filename(track)), 0, volume=vol, noise_path=noise_p, denoise_mix=d_mix)
                 self.seek_offset = 0
                 self.timeline_var.set(0)
                 self.btn_play_pause.config(text="⏸ Pause")
@@ -1954,7 +2654,8 @@ class DJAppUI:
             elif idx == 0:
                 track = self.project.tracks[idx]
                 vol = track.get('volume', 100.0) / 100.0
-                self.audio.play_from(os.path.join(self.project.current_folder, track['filename']), 0, volume=vol)
+                noise_p, d_mix = self._get_noise_play_args(track)
+                self.audio.play_from(os.path.join(self.project.current_folder, self._get_playback_filename(track)), 0, volume=vol, noise_path=noise_p, denoise_mix=d_mix)
                 self.seek_offset = 0
                 self.timeline_var.set(0)
                 self.sync_ui_state()

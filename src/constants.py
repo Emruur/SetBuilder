@@ -7,5 +7,9 @@ BTN_HOVER = "#555555" # Keep hover color distinct
 HIGHLIGHT = "#DC9230" # Changed from blue to orange
 BORDER = "#444444"
 
-VINYL_SIZE = 220 
+VINYL_SIZE = 220
 CENTER_HOLE = 12
+
+# URL to the SetBuilderDenoiser.app zip (update each release)
+DENOISER_DOWNLOAD_URL = "https://github.com/yourname/setbuilder/releases/latest/download/SetBuilderDenoiser.zip"
+DENOISER_INSTALL_DIR  = "~/Applications"
