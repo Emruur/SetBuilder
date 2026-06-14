@@ -12,4 +12,4 @@ CENTER_HOLE = 12
 
 # URL to the SetBuilderDenoiser.app zip (update each release)
 DENOISER_DOWNLOAD_URL = "https://github.com/Emruur/SetBuilder/releases/download/v2.0/SetBuilderDenoiser.zip"
-DENOISER_INSTALL_DIR  = "~/Applications"
+DENOISER_INSTALL_DIR  = "~/Library/Application Support/SetBuilder"

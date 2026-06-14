@@ -1732,7 +1732,7 @@ class DJAppUI:
                 "Denoiser Module Required",
                 f"The denoiser module is not installed.\n\n"
                 f"Download and install it now? (~256 MB)\n\n"
-                f"It will be saved to {DENOISER_INSTALL_DIR} and denoising will start automatically."
+                f"It will be saved to ~/Library/Application Support/SetBuilder and denoising will start automatically."
             )
             if not ok:
                 return

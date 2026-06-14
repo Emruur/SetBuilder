@@ -353,21 +353,19 @@ class AudioEngine:
             return None, False
 
         exe_dir = os.path.dirname(sys.executable)
-        # From SetBuilder.app/Contents/MacOS/ go up three levels to get the parent folder
         apps_dir = os.path.normpath(os.path.join(exe_dir, '..', '..', '..'))
         app_binary = os.path.join('SetBuilderDenoiser.app', 'Contents', 'MacOS', 'SetBuilderDenoiser')
 
-        for search_dir in [apps_dir,
+        # App Support is the primary install location (always writable, no Gatekeeper issues)
+        app_support = os.path.expanduser('~/Library/Application Support/SetBuilder')
+
+        for search_dir in [app_support,
+                           apps_dir,
                            os.path.expanduser('~/Applications'),
                            '/Applications']:
             p = os.path.normpath(os.path.join(search_dir, app_binary))
             if os.path.isfile(p) and os.access(p, os.X_OK):
                 return p, False
-
-        # Flat build: companion binary sits next to the main executable
-        flat = os.path.join(exe_dir, 'SetBuilderDenoiser')
-        if os.path.isfile(flat) and os.access(flat, os.X_OK):
-            return flat, False
 
         return None, False
 
