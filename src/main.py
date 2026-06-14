@@ -22,7 +22,7 @@ from AudioCore import AudioEngine
 from ProjectManager import ProjectState
 from PIL import Image, ImageTk, ImageOps, ImageEnhance
 
-from constants import BG_MAIN, BG_LIST, FG_TEXT, BTN_NORMAL, BTN_HOVER, HIGHLIGHT, BORDER, VINYL_SIZE, CENTER_HOLE, DENOISER_DOWNLOAD_URL, DENOISER_INSTALL_DIR
+from constants import BG_MAIN, BG_LIST, FG_TEXT, BTN_NORMAL, BTN_HOVER, HIGHLIGHT, BORDER, VINYL_SIZE, CENTER_HOLE, DENOISER_DOWNLOAD_URL, DENOISER_INSTALL_DIR, DENOISER_VERSION
 from ui_components import create_btn, create_group_frame, Knob, Timeline
 from export_dialog import ExportDialog
 from vinyl_animator import VinylAnimator
@@ -1706,10 +1706,13 @@ class DJAppUI:
                 _sp.run(['unzip', '-o', zip_path, '-d', install_dir],
                         check=True, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
                 os.remove(zip_path)
-                # Strip macOS quarantine so bundled binaries (ffmpeg) can execute
+                # Strip macOS quarantine so bundled binaries can execute
                 _sp.run(['xattr', '-rd', 'com.apple.quarantine',
                          os.path.join(install_dir, 'SetBuilderDenoiser.app')],
                         check=False, stdout=_sp.DEVNULL, stderr=_sp.DEVNULL)
+                # Write version stamp so stale companions are detected and replaced
+                with open(os.path.join(install_dir, 'denoiser_version.txt'), 'w') as _vf:
+                    _vf.write(DENOISER_VERSION)
 
                 self.root.after(0, self._finish_task, ext_task)
                 self.root.after(0, on_done)
@@ -1725,7 +1728,7 @@ class DJAppUI:
         threading.Thread(target=worker, daemon=True).start()
 
     def _start_denoising(self, idx):
-        companion, is_script = AudioEngine.find_denoiser_companion()
+        companion, is_script = AudioEngine.find_denoiser_companion(required_version=DENOISER_VERSION)
         if companion is None:
             # Ask user if they want to download the companion
             ok = messagebox.askyesno(

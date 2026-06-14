@@ -343,8 +343,12 @@ class AudioEngine:
     DENOISE_MODEL = 'denoise_mel_band_roformer_aufr33_sdr_27.9959.ckpt'
 
     @staticmethod
-    def find_denoiser_companion():
-        """Return (path, is_script) for the SetBuilderDenoiser companion, or (None, False)."""
+    def find_denoiser_companion(required_version=None):
+        """Return (path, is_script) for the SetBuilderDenoiser companion, or (None, False).
+
+        If required_version is given, companions without a matching version stamp
+        in their install dir are rejected (triggers re-download).
+        """
         if not getattr(sys, 'frozen', False):
             here = os.path.dirname(os.path.abspath(__file__))
             worker = os.path.join(here, 'denoiser_worker.py')
@@ -355,8 +359,6 @@ class AudioEngine:
         exe_dir = os.path.dirname(sys.executable)
         apps_dir = os.path.normpath(os.path.join(exe_dir, '..', '..', '..'))
         app_binary = os.path.join('SetBuilderDenoiser.app', 'Contents', 'MacOS', 'SetBuilderDenoiser')
-
-        # App Support is the primary install location (always writable, no Gatekeeper issues)
         app_support = os.path.expanduser('~/Library/Application Support/SetBuilder')
 
         for search_dir in [app_support,
@@ -364,8 +366,21 @@ class AudioEngine:
                            os.path.expanduser('~/Applications'),
                            '/Applications']:
             p = os.path.normpath(os.path.join(search_dir, app_binary))
-            if os.path.isfile(p) and os.access(p, os.X_OK):
-                return p, False
+            if not (os.path.isfile(p) and os.access(p, os.X_OK)):
+                continue
+            # For the managed App Support location, enforce version stamp
+            if required_version and search_dir == app_support:
+                stamp = os.path.join(app_support, 'denoiser_version.txt')
+                try:
+                    installed = open(stamp).read().strip()
+                except OSError:
+                    installed = None
+                if installed != required_version:
+                    import shutil
+                    shutil.rmtree(os.path.join(app_support, 'SetBuilderDenoiser.app'),
+                                  ignore_errors=True)
+                    continue
+            return p, False
 
         return None, False
 
