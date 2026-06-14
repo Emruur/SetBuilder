@@ -25,6 +25,23 @@ os.environ['NUMBA_CACHE_DIR'] = cache_dir
 import librosa
 from pedalboard import Pedalboard, Compressor, HighShelfFilter, LowShelfFilter, PeakFilter, Distortion, Limiter, Gain, load_plugin
 
+def _strip_own_quarantine():
+    """Remove macOS quarantine from this app's own bundle on first run after download."""
+    if not (getattr(sys, 'frozen', False) and sys.platform == 'darwin'):
+        return
+    try:
+        # Walk up from Contents/MacOS/ to the .app bundle root
+        bundle = os.path.normpath(
+            os.path.join(os.path.dirname(sys.executable), '..', '..'))
+        subprocess.run(
+            ['xattr', '-rd', 'com.apple.quarantine', bundle],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, check=False)
+    except Exception:
+        pass
+
+_strip_own_quarantine()
+
+
 def get_ffmpeg_path():
     """Determines the correct path for the ffmpeg binary, whether bundled or in system PATH."""
     ffmpeg_exe = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
