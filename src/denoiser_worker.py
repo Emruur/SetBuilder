@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-"""SetBuilder Denoiser — companion process for audio denoising.
+"""SetBuilder Denoiser — companion process. ML inference only; no ffmpeg.
 
 Writes newline-delimited JSON to stdout:
   {"type": "progress", "stage": "download"|"inference", "pct": 0-100}
   {"type": "download_done"}
-  {"type": "done"}
+  {"type": "done", "dry_wav": "...", "noise_wav": "...", "tmp_dir": "..."}
   {"type": "error", "message": "..."}
+
+The base app receives the WAV paths and handles ffmpeg conversion itself.
 """
 import sys
 import os
 import json
 import argparse
-import subprocess
 import tempfile
-import shutil
 
 
 def emit(obj):
@@ -30,45 +30,23 @@ def _model_dir():
     return os.path.join(os.path.expanduser('~'), '.SetBuilder', 'separator_models')
 
 
-def _ffmpeg(hint=None):
-    exe = 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg'
-    if getattr(sys, 'frozen', False):
-        exe_dir = os.path.dirname(sys.executable)
-        meipass = getattr(sys, '_MEIPASS', None)
-        for d in [exe_dir,
-                  os.path.join(exe_dir, '..', 'Frameworks'),
-                  os.path.join(exe_dir, '..', 'Resources'),
-                  meipass]:
-            if d:
-                p = os.path.normpath(os.path.join(d, exe))
-                if os.path.isfile(p):
-                    return p
-    if hint and os.path.isfile(hint):
-        return hint
-    for p in ['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg']:
-        if os.path.isfile(p):
-            return p
-    return exe
-
-
-def run(source_path, dest_path, noise_dest_path=None):
+def run(source_path):
     from audio_separator.separator import Separator
     import audio_separator.separator.separator as _sep_mod
     import audio_separator.separator.architectures.mdxc_separator as _mdxc_mod
 
     model_dir = _model_dir()
     os.makedirs(model_dir, exist_ok=True)
-    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
 
     need_download = not os.path.exists(os.path.join(model_dir, DENOISE_MODEL))
 
-    _orig_sep_tqdm = _sep_mod.tqdm
+    _orig_sep_tqdm  = _sep_mod.tqdm
     _orig_mdxc_tqdm = _mdxc_mod.tqdm
 
     class _DownloadProxy:
         def __init__(self, total=0, **_kw):
             self._total = total
-            self._done = 0
+            self._done  = 0
         def update(self, n=1):
             self._done += n
             if self._total > 0:
@@ -91,7 +69,7 @@ def run(source_path, dest_path, noise_dest_path=None):
         def __enter__(self): return self
         def __exit__(self, *_): pass
 
-    _sep_mod.tqdm = _DownloadProxy
+    _sep_mod.tqdm  = _DownloadProxy
     _mdxc_mod.tqdm = _InferenceProxy
 
     tmp_dir = tempfile.mkdtemp()
@@ -126,37 +104,29 @@ def run(source_path, dest_path, noise_dest_path=None):
         if not dry:
             raise RuntimeError(f'No dry stem found in: {wavs}')
 
-        ffmpeg = _ffmpeg()
-        cmd = [ffmpeg, '-y',
-               '-i', os.path.join(tmp_dir, dry[0]), '-i', str(source_path),
-               '-map', '0:a:0', '-map', '1:v:0?', '-map_metadata', '1',
-               '-c:v', 'copy', '-codec:a', 'libmp3lame', '-q:a', '0',
-               '-id3v2_version', '3', str(dest_path)]
-        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-        if noise_dest_path and noise_wavs:
-            os.makedirs(os.path.dirname(noise_dest_path), exist_ok=True)
-            cmd_n = [ffmpeg, '-y',
-                     '-i', os.path.join(tmp_dir, noise_wavs[0]),
-                     '-codec:a', 'libmp3lame', '-q:a', '2', str(noise_dest_path)]
-            subprocess.run(cmd_n, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    finally:
-        _sep_mod.tqdm = _orig_sep_tqdm
-        _mdxc_mod.tqdm = _orig_mdxc_tqdm
+        # Emit paths — base app handles ffmpeg conversion using its own binary
+        emit({
+            'type':      'done',
+            'dry_wav':   os.path.join(tmp_dir, dry[0]),
+            'noise_wav': os.path.join(tmp_dir, noise_wavs[0]) if noise_wavs else None,
+            'tmp_dir':   tmp_dir,
+        })
+    except Exception:
+        import shutil
         shutil.rmtree(tmp_dir, ignore_errors=True)
-
-    emit({'type': 'done'})
+        raise
+    finally:
+        _sep_mod.tqdm  = _orig_sep_tqdm
+        _mdxc_mod.tqdm = _orig_mdxc_tqdm
 
 
 if __name__ == '__main__':
     ap = argparse.ArgumentParser(description='SetBuilder Denoiser companion')
     ap.add_argument('--input', required=True)
-    ap.add_argument('--output', required=True)
-    ap.add_argument('--noise-output', default=None)
     args = ap.parse_args()
 
     try:
-        run(args.input, args.output, args.noise_output)
+        run(args.input)
     except Exception as exc:
         emit({'type': 'error', 'message': str(exc)})
         sys.exit(1)

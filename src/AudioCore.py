@@ -376,14 +376,15 @@ class AudioEngine:
         """Spawn the companion process and relay JSON progress to callbacks."""
         import json
 
+        import json, shutil
+
+        # Companion only takes --input; base app handles ffmpeg conversion
         cmd = ([sys.executable, companion_path] if is_script else [companion_path]) + [
             '--input', str(source_path),
-            '--output', str(dest_path),
         ]
-        if noise_dest_path:
-            cmd += ['--noise-output', str(noise_dest_path)]
 
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+        tmp_dir = None
         try:
             for raw in proc.stdout:
                 line = raw.strip()
@@ -404,6 +405,29 @@ class AudioEngine:
                     if download_done_cb:
                         download_done_cb()
                 elif t == 'done':
+                    # Companion finished inference — convert WAVs to MP3 here
+                    dry_wav   = msg.get('dry_wav')
+                    noise_wav = msg.get('noise_wav')
+                    tmp_dir   = msg.get('tmp_dir')
+                    ffmpeg    = get_ffmpeg_path()
+
+                    os.makedirs(os.path.dirname(dest_path), exist_ok=True)
+                    subprocess.run(
+                        [ffmpeg, '-y',
+                         '-i', dry_wav, '-i', str(source_path),
+                         '-map', '0:a:0', '-map', '1:v:0?', '-map_metadata', '1',
+                         '-c:v', 'copy', '-codec:a', 'libmp3lame', '-q:a', '0',
+                         '-id3v2_version', '3', str(dest_path)],
+                        check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+                    if noise_dest_path and noise_wav:
+                        os.makedirs(os.path.dirname(noise_dest_path), exist_ok=True)
+                        subprocess.run(
+                            [ffmpeg, '-y',
+                             '-i', noise_wav,
+                             '-codec:a', 'libmp3lame', '-q:a', '2', str(noise_dest_path)],
+                            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
                     if inference_cb:
                         inference_cb(100.0)
                 elif t == 'error':
@@ -411,6 +435,8 @@ class AudioEngine:
                     raise RuntimeError(msg.get('message', 'Denoiser companion error'))
         finally:
             proc.wait()
+            if tmp_dir:
+                shutil.rmtree(tmp_dir, ignore_errors=True)
 
         if proc.returncode != 0:
             raise RuntimeError(f'Denoiser companion exited with code {proc.returncode}')

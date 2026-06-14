@@ -8,10 +8,7 @@ block_cipher = None
 _as_datas, _as_bins, _as_hidden = collect_all('audio_separator')
 _torch_datas, _torch_bins, _torch_hidden = collect_all('torch')
 
-_datas = []
-if _os.path.exists('assets/ffmpeg'):
-    _datas.append(('assets/ffmpeg', '.'))
-_datas += _as_datas + _torch_datas
+_datas = _as_datas + _torch_datas
 
 a = Analysis(
     ['src/denoiser_worker.py'],
