@@ -31,25 +31,10 @@ def get_ffmpeg_path():
     if getattr(sys, 'frozen', False):
         exe_dir = os.path.dirname(sys.executable)
         meipass = getattr(sys, '_MEIPASS', None)
-        candidate_dirs = [
-            exe_dir,
-            os.path.join(exe_dir, '..', 'Frameworks'),
-            os.path.join(exe_dir, '..', 'Resources'),
-            meipass,
-        ]
-        # Write diagnostics so we can see what's happening
-        try:
-            debug_path = os.path.expanduser('~/Desktop/setbuilder_ffmpeg_debug.txt')
-            with open(debug_path, 'w') as _f:
-                _f.write(f"sys.executable: {sys.executable}\n")
-                _f.write(f"sys._MEIPASS: {meipass}\n")
-                for d in candidate_dirs:
-                    if d:
-                        p = os.path.normpath(os.path.join(d, ffmpeg_exe))
-                        _f.write(f"  checking: {p} -> exists={os.path.isfile(p)}\n")
-        except Exception as _e:
-            pass
-        for d in candidate_dirs:
+        for d in [exe_dir,
+                  os.path.join(exe_dir, '..', 'Frameworks'),
+                  os.path.join(exe_dir, '..', 'Resources'),
+                  meipass]:
             if d:
                 p = os.path.normpath(os.path.join(d, ffmpeg_exe))
                 if os.path.isfile(p):
@@ -396,7 +381,6 @@ class AudioEngine:
         cmd = ([sys.executable, companion_path] if is_script else [companion_path]) + [
             '--input', str(source_path),
             '--output', str(dest_path),
-            '--ffmpeg', get_ffmpeg_path(),
         ]
         if noise_dest_path:
             cmd += ['--noise-output', str(noise_dest_path)]

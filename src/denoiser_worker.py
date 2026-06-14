@@ -32,41 +32,26 @@ def _model_dir():
 
 def _ffmpeg(hint=None):
     exe = 'ffmpeg.exe' if sys.platform == 'win32' else 'ffmpeg'
-    meipass = getattr(sys, '_MEIPASS', None)
-    exe_dir = os.path.dirname(sys.executable) if getattr(sys, 'frozen', False) else None
-
-    candidates = []
-    if hint:
-        candidates.append(('hint', hint))
-    if exe_dir:
-        candidates += [
-            ('MacOS', os.path.normpath(os.path.join(exe_dir, exe))),
-            ('Frameworks', os.path.normpath(os.path.join(exe_dir, '..', 'Frameworks', exe))),
-            ('Resources', os.path.normpath(os.path.join(exe_dir, '..', 'Resources', exe))),
-        ]
-    if meipass:
-        candidates.append(('_MEIPASS', os.path.normpath(os.path.join(meipass, exe))))
-    candidates += [
-        ('homebrew', '/opt/homebrew/bin/ffmpeg'),
-        ('local', '/usr/local/bin/ffmpeg'),
-    ]
-
-    try:
-        debug_path = os.path.expanduser('~/Desktop/denoiser_ffmpeg_debug.txt')
-        with open(debug_path, 'w') as f:
-            f.write(f"hint: {hint}\nsys.executable: {sys.executable}\n_MEIPASS: {meipass}\nfrozen: {getattr(sys,'frozen',False)}\n\n")
-            for label, p in candidates:
-                f.write(f"  [{label}] {p} -> {os.path.isfile(p)}\n")
-    except Exception:
-        pass
-
-    for label, p in candidates:
+    if getattr(sys, 'frozen', False):
+        exe_dir = os.path.dirname(sys.executable)
+        meipass = getattr(sys, '_MEIPASS', None)
+        for d in [exe_dir,
+                  os.path.join(exe_dir, '..', 'Frameworks'),
+                  os.path.join(exe_dir, '..', 'Resources'),
+                  meipass]:
+            if d:
+                p = os.path.normpath(os.path.join(d, exe))
+                if os.path.isfile(p):
+                    return p
+    if hint and os.path.isfile(hint):
+        return hint
+    for p in ['/opt/homebrew/bin/ffmpeg', '/usr/local/bin/ffmpeg']:
         if os.path.isfile(p):
             return p
     return exe
 
 
-def run(source_path, dest_path, noise_dest_path=None, ffmpeg_hint=None):
+def run(source_path, dest_path, noise_dest_path=None):
     from audio_separator.separator import Separator
     import audio_separator.separator.separator as _sep_mod
     import audio_separator.separator.architectures.mdxc_separator as _mdxc_mod
@@ -141,7 +126,7 @@ def run(source_path, dest_path, noise_dest_path=None, ffmpeg_hint=None):
         if not dry:
             raise RuntimeError(f'No dry stem found in: {wavs}')
 
-        ffmpeg = _ffmpeg(ffmpeg_hint)
+        ffmpeg = _ffmpeg()
         cmd = [ffmpeg, '-y',
                '-i', os.path.join(tmp_dir, dry[0]), '-i', str(source_path),
                '-map', '0:a:0', '-map', '1:v:0?', '-map_metadata', '1',
@@ -168,11 +153,10 @@ if __name__ == '__main__':
     ap.add_argument('--input', required=True)
     ap.add_argument('--output', required=True)
     ap.add_argument('--noise-output', default=None)
-    ap.add_argument('--ffmpeg', default=None)
     args = ap.parse_args()
 
     try:
-        run(args.input, args.output, args.noise_output, ffmpeg_hint=args.ffmpeg)
+        run(args.input, args.output, args.noise_output)
     except Exception as exc:
         emit({'type': 'error', 'message': str(exc)})
         sys.exit(1)
