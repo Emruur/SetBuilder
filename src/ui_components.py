@@ -37,6 +37,17 @@ class Knob(tk.Canvas):
         self.size = size
         self.disabled = False
         self.pill = pill  # rounded pill bg: dark oval on BG_LIST canvas
+
+        m = 4
+        s = self.size - m
+        track_color = BORDER if pill else BG_LIST
+        self._pill_id = self.create_oval(1, 1, self.size - 1, self.size - 1,
+                                         fill=BG_MAIN, outline="") if pill else None
+        self._track_arc_id = self.create_arc(m, m, s, s, start=-45, extent=270,
+                                             style=tk.ARC, outline=track_color, width=3)
+        self._value_arc_id = self.create_arc(m, m, s, s, start=225, extent=0,
+                                             style=tk.ARC, outline=HIGHLIGHT, width=3)
+
         self.bind("<ButtonPress-1>", self.on_press)
         self.bind("<B1-Motion>", self.on_drag)
         self.variable.trace_add('write', self.draw)
@@ -59,20 +70,11 @@ class Knob(tk.Canvas):
         self.draw()
 
     def draw(self, *args):
-        self.delete("all")
         val = self.variable.get()
         pct = (val - self.from_) / (self.to_ - self.from_) if self.to_ != self.from_ else 0
         outline_color = "#555555" if self.disabled else HIGHLIGHT
-        m = 4
-        s = self.size - m
-        if self.pill:
-            # Dark rounded pill bg so knob is visible on BG_LIST parent
-            self.create_oval(1, 1, self.size - 1, self.size - 1, fill=BG_MAIN, outline="")
-            track_color = BORDER
-        else:
-            track_color = BG_LIST
-        self.create_arc(m, m, s, s, start=-45, extent=270, style=tk.ARC, outline=track_color, width=3)
-        self.create_arc(m, m, s, s, start=225, extent=-270*pct, style=tk.ARC, outline=outline_color, width=3)
+        self.itemconfigure(self._value_arc_id,
+                           extent=-270 * pct, outline=outline_color)
 
 class Timeline(tk.Canvas):
     def __init__(self, parent, variable, max_val=100.0, command=None, *args, **kwargs):
@@ -80,6 +82,7 @@ class Timeline(tk.Canvas):
         self.variable = variable
         self.max_val = max_val
         self.command = command
+        self._fill_id = self.create_rectangle(0, 0, 0, 0, fill=HIGHLIGHT, outline="")
         self.bind("<Button-1>", self.on_click)
         self.bind("<B1-Motion>", self.on_drag)
         self.bind("<ButtonRelease-1>", self.on_release)
@@ -107,7 +110,7 @@ class Timeline(tk.Canvas):
         new_val = (x / w) * self.max_val
         self.variable.set(new_val)
         if self.command: self.command(new_val, dragging=True)
-        
+
     def on_release(self, event):
         if self.max_val <= 0: return
         w = self.winfo_width()
@@ -118,10 +121,11 @@ class Timeline(tk.Canvas):
         if self.command: self.command(new_val, dragging=False)
 
     def draw(self, *args):
-        self.delete("all")
         w = self.winfo_width()
         h = self.winfo_height()
         if self.max_val > 0 and w > 0:
             val = self.variable.get()
             pct = max(0, min(1, val / self.max_val))
-            self.create_rectangle(0, 0, w * pct, h, fill=HIGHLIGHT, outline="")
+            self.coords(self._fill_id, 0, 0, w * pct, h)
+        else:
+            self.coords(self._fill_id, 0, 0, 0, 0)

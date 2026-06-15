@@ -81,6 +81,9 @@ class DJAppUI:
         self.scrub_timer = None
         self.keys_down = {'m': False, 'v': False}
 
+        self._thumb_cache = {}
+        self._thumb_cache_folder = None
+
         self.setup_ui()
         self.bind_shortcuts()
         self._setup_file_drop()
@@ -248,11 +251,32 @@ class DJAppUI:
         self.left_canvas.create_window((0, 0), window=left_inner, anchor="nw", width=280)
         self.left_canvas.configure(yscrollcommand=self.left_scrollbar.set)
         
+        # Cached geometry for the wheel handler — re-measuring on every wheel
+        # event causes jitter on trackpads (each winfo_* call can sync-flush
+        # pending layout). These are refreshed on <Configure>/<Map>.
+        self._rack_req_h = 0
+        self._rack_canv_h = 0
+        self._rack_rect = (0, 0, 0, 0)  # (rootx, rooty, width, height)
+
+        def _refresh_rack_cache():
+            try:
+                self._rack_req_h = left_inner.winfo_reqheight()
+                self._rack_canv_h = self.left_canvas.winfo_height()
+                self._rack_rect = (
+                    self.left_canvas.winfo_rootx(),
+                    self.left_canvas.winfo_rooty(),
+                    self.left_canvas.winfo_width(),
+                    self._rack_canv_h,
+                )
+            except tk.TclError:
+                pass
+
         self._scroll_timer = None
         def _do_update_scrollregion():
             self.left_canvas.configure(scrollregion=self.left_canvas.bbox("all"))
-            req_h = left_inner.winfo_reqheight()
-            canv_h = self.left_canvas.winfo_height()
+            _refresh_rack_cache()
+            req_h = self._rack_req_h
+            canv_h = self._rack_canv_h
             if req_h > canv_h and canv_h > 1:
                 if not self.left_scrollbar.winfo_manager():
                     self.left_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
@@ -267,47 +291,58 @@ class DJAppUI:
 
         left_inner.bind("<Configure>", _update_scrollregion)
         self.left_canvas.bind("<Configure>", _update_scrollregion)
+        self.left_canvas.bind("<Map>", lambda e: _refresh_rack_cache())
+        # Window drags don't fire Configure on child widgets, so the rack's
+        # rootx/rooty drifts off-screen-position. Refresh on root motion too.
+        self.root.bind("<Configure>", lambda e: _refresh_rack_cache(), add="+")
         self.left_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        
-        # Enable cross-platform mouse wheel scrolling over the effect rack.
-        # Throttle to one repaint per ~16ms (≈60fps) so trackpad bursts don't
-        # queue hundreds of expensive child-widget repositions.
-        _scroll_acc   = [0.0]
-        _scroll_pend  = [False]
-        self._last_scroll_t = [0.0]   # shared with animation timer
 
-        def _flush_scroll():
-            _scroll_pend[0] = False
-            delta = _scroll_acc[0];  _scroll_acc[0] = 0.0
-            if delta == 0.0: return
-            req_h = left_inner.winfo_reqheight()
-            canv_h = self.left_canvas.winfo_height()
-            if req_h <= canv_h: return
+        # Smooth-scroll animation: each wheel event nudges a target position;
+        # a 60fps loop eases the actual canvas toward it. Big swipes glide
+        # instead of teleporting in chunks.
+        self._scroll_target_top = None
+        self._scroll_anim_job = None
+        self._last_scroll_t = [0.0]   # shared with EQ spectrum animation
+
+        EASE = 0.30   # fraction of remaining distance per frame
+        SNAP = 0.0008 # close-enough threshold (≈1px on a tall rack)
+
+        def _scroll_anim():
+            self._scroll_anim_job = None
+            target = self._scroll_target_top
+            if target is None:
+                return
+            current = self.left_canvas.yview()[0]
+            diff = target - current
             self._last_scroll_t[0] = time.monotonic()
-            top, _ = self.left_canvas.yview()
-            self.left_canvas.yview_moveto(
-                max(0.0, min(1.0, top - delta / (req_h * 2.5))))
+            if abs(diff) < SNAP:
+                self.left_canvas.yview_moveto(target)
+                self._scroll_target_top = None
+                return
+            self.left_canvas.yview_moveto(current + diff * EASE)
+            self._scroll_anim_job = self.left_canvas.after(16, _scroll_anim)
 
         def _on_mousewheel(event):
-            # Only act when the cursor is actually over the DSP rack canvas.
-            # Position-check avoids interfering with the setlist Treeview.
-            try:
-                mx, my = self.root.winfo_pointerx(), self.root.winfo_pointery()
-                lx, ly = self.left_canvas.winfo_rootx(), self.left_canvas.winfo_rooty()
-                if not (lx <= mx <= lx + self.left_canvas.winfo_width() and
-                        ly <= my <= ly + self.left_canvas.winfo_height()):
-                    return
-            except tk.TclError:
+            # Cursor hit-test against the cached rack rect — avoids any winfo_*
+            # call on the hot path. event.x_root/y_root come free with the event.
+            lx, ly, lw, lh = self._rack_rect
+            if lw == 0 or lh == 0:
+                _refresh_rack_cache()
+                lx, ly, lw, lh = self._rack_rect
+            if not (lx <= event.x_root <= lx + lw and ly <= event.y_root <= ly + lh):
                 return
-            req_h = left_inner.winfo_reqheight()
-            if req_h <= self.left_canvas.winfo_height(): return
+            req_h = self._rack_req_h
+            if req_h <= self._rack_canv_h or req_h <= 0:
+                return
             if hasattr(event, 'num') and event.num in (4, 5):
-                _scroll_acc[0] += -120 if event.num == 4 else 120
+                delta = -120 if event.num == 4 else 120
             else:
-                _scroll_acc[0] += event.delta
-            if not _scroll_pend[0]:
-                _scroll_pend[0] = True
-                self.left_canvas.after(16, _flush_scroll)
+                delta = event.delta
+            base = self._scroll_target_top if self._scroll_target_top is not None \
+                   else self.left_canvas.yview()[0]
+            self._scroll_target_top = max(0.0, min(1.0, base - delta / (req_h * 2.5)))
+            if self._scroll_anim_job is None:
+                self._scroll_anim_job = self.left_canvas.after(0, _scroll_anim)
 
         # Recursively bind to every widget inside the rack so instance bindings
         # fire before any class-level binding that might swallow the event.
@@ -568,17 +603,8 @@ class DJAppUI:
         right_inner = tk.Frame(right_control_frame, bg=BG_MAIN)
         right_inner.pack(expand=True)
 
-        search_btn = tk.Label(right_inner, text="⌕", bg=BTN_NORMAL, fg=FG_TEXT,
-                              font=("Helvetica", 18), cursor="hand2",
-                              padx=10, pady=4,
-                              highlightbackground=BORDER, highlightthickness=1)
-        search_btn.pack(pady=(4, 8), padx=5, fill=tk.X)
-        search_btn.bind("<Enter>",    lambda e: search_btn.config(bg=BTN_HOVER))
-        search_btn.bind("<Leave>",    lambda e: search_btn.config(bg=BTN_NORMAL))
-        search_btn.bind("<Button-1>", lambda e: self.open_search_popup())
-
         math_group = tk.Frame(right_inner, bg=BG_MAIN, highlightbackground=BORDER, highlightthickness=1)
-        math_group.pack(pady=(0, 10), padx=5, fill=tk.X)
+        math_group.pack(pady=(4, 10), padx=5, fill=tk.X)
         tk.Label(math_group, text="BPM", bg=BG_MAIN, fg=FG_TEXT, font=("Helvetica", 9, "bold")).pack(pady=(5,2))
         self.bpm_var = tk.StringVar()
         self.bpm_entry = tk.Entry(math_group, textvariable=self.bpm_var, width=6,
@@ -589,9 +615,7 @@ class DJAppUI:
         self.bpm_entry.pack(pady=(0, 4), ipady=3)
         self.bpm_entry.bind("<Return>", self._on_bpm_edit)
         self.bpm_entry.bind("<FocusOut>", self._on_bpm_edit)
-        self.create_btn(math_group, "x2", lambda: self.modify_bpm(2.0), BTN_NORMAL, 4).pack(pady=2)
-        self.create_btn(math_group, "÷2", lambda: self.modify_bpm(0.5), BTN_NORMAL, 4).pack(pady=2)
-        self.create_btn(math_group, "↻ Sort", self.resort_project, "#a86a11", 6).pack(pady=(10, 5), padx=5)
+        self.create_btn(math_group, "↻ Sort", self.resort_project, "#a86a11", 6).pack(pady=(4, 5), padx=5)
 
         history_group = tk.Frame(right_inner, bg=BG_MAIN, highlightbackground=BORDER, highlightthickness=1)
         history_group.pack(pady=(0, 10), padx=5, fill=tk.X)
@@ -606,14 +630,13 @@ class DJAppUI:
         move_group = tk.Frame(right_inner, bg=BG_MAIN, highlightbackground=BORDER, highlightthickness=1)
         move_group.pack(pady=5, padx=5, fill=tk.X)
         tk.Label(move_group, text="Move", bg=BG_MAIN, fg=FG_TEXT, font=("Helvetica", 9, "bold")).pack(pady=(5,2))
-        self.create_btn(move_group, "▲▲", lambda: self.shift_track(-5), "#444444", 4).pack(pady=2)
-        self.create_btn(move_group, "▲", lambda: self.shift_track(-1), BTN_NORMAL, 4).pack(pady=2)
-        self.create_btn(move_group, "▼", lambda: self.shift_track(1), BTN_NORMAL, 4).pack(pady=2)
-        self.create_btn(move_group, "▼▼", lambda: self.shift_track(5), "#444444", 4).pack(pady=(2, 5))
+        self.create_btn(move_group, "▲▲", lambda: self.shift_track(-10), "#444444", 4).pack(pady=2)
+        self.create_btn(move_group, "▼▼", lambda: self.shift_track(10), "#444444", 4).pack(pady=(2, 5))
 
         out_group = tk.Frame(right_inner, bg=BG_MAIN, highlightbackground=BORDER, highlightthickness=1)
         out_group.pack(pady=(10, 5), padx=5, fill=tk.X)
         tk.Label(out_group, text="Set", bg=BG_MAIN, fg=FG_TEXT, font=("Helvetica", 9, "bold")).pack(pady=(5, 2))
+        self.create_btn(out_group, "⌕ Search", self.open_search_popup, BTN_NORMAL, 8).pack(pady=2)
         self.btn_sort_out = self.create_btn(out_group, "✕ Remove", self.toggle_inactive, BTN_NORMAL, 8)
         self.btn_sort_out.pack(pady=(2, 5))
 
@@ -1020,48 +1043,118 @@ class DJAppUI:
                 (A+1)-(A-1)*cw+2*sqA*al, 2*((A-1)-(A+1)*cw), (A+1)-(A-1)*cw-2*sqA*al)
 
         N_BANDS = 28
+        GRID_FREQS = [(100, "100"), (1000, "1k"), (10000, "10k")]
+
+        cache = {
+            'bars': None,        # 28 rectangle item ids
+            'curve': None,       # line id
+            'zero_line': None,
+            'grid_lines': None,  # 3 line ids
+            'grid_labels': None, # 3 text ids
+            'handles': None,     # {'low','mid','high'} oval ids
+            'last_w': -1,
+            'last_h': -1,
+            'window': None,
+            'edges': None,
+            'fft_freqs': None,
+            'edge_masks': None,
+            'edge_xs': None,
+            'freqs_axis': None,
+        }
+
+        def _ensure_items():
+            if cache['bars'] is not None:
+                return
+            cache['bars'] = [
+                cv.create_rectangle(0, 0, 0, 0, fill="#1a2e1a", outline="", state='hidden')
+                for _ in range(N_BANDS)
+            ]
+            cache['zero_line'] = cv.create_line(0, 0, 0, 0, fill="#333333")
+            cache['grid_lines'] = [cv.create_line(0, 0, 0, 0, fill="#252525") for _ in GRID_FREQS]
+            cache['grid_labels'] = [
+                cv.create_text(0, 0, text=lbl, fill="#404040", font=("Helvetica", 6), anchor='sw')
+                for _, lbl in GRID_FREQS
+            ]
+            cache['curve'] = cv.create_line(0, 0, 0, 0, fill=HIGHLIGHT, width=1.5, smooth=True)
+            cache['handles'] = {
+                band: cv.create_oval(0, 0, 0, 0, fill=HIGHLIGHT, outline=BG_MAIN, width=1.5)
+                for band in ('low', 'mid', 'high')
+            }
+
+        def _ensure_const_cache():
+            if cache['window'] is None:
+                buf_len = len(self.audio.spectrum_buffer)
+                cache['window'] = np.hanning(buf_len)
+                cache['fft_freqs'] = np.fft.rfftfreq(buf_len, 1.0 / SR)
+                cache['edges'] = np.logspace(np.log10(20), np.log10(20000), N_BANDS + 1)
+                cache['edge_masks'] = [
+                    (cache['fft_freqs'] >= cache['edges'][i]) & (cache['fft_freqs'] < cache['edges'][i+1])
+                    for i in range(N_BANDS)
+                ]
+
+        def _update_geom(w, h):
+            cache['last_w'] = w
+            cache['last_h'] = h
+            cache['edge_xs'] = np.array([freq_to_x(e, w) for e in cache['edges']])
+            cache['freqs_axis'] = np.logspace(np.log10(20), np.log10(20000), w)
+            y0 = gain_to_y(0, h)
+            cv.coords(cache['zero_line'], 0, y0, w, y0)
+            for (gf, _lbl), line_id, label_id in zip(GRID_FREQS, cache['grid_lines'], cache['grid_labels']):
+                gx = freq_to_x(gf, w)
+                cv.coords(line_id, gx, 0, gx, h)
+                cv.coords(label_id, gx + 2, h - 1)
 
         def draw(*_):
-            cv.delete("all")
             w, h = cv.winfo_width(), cv.winfo_height()
             if w < 20 or h < 20: return
+
+            _ensure_items()
+            _ensure_const_cache()
+            if w != cache['last_w'] or h != cache['last_h']:
+                _update_geom(w, h)
+
             bypassed = self.dsp_vars['eq_bypass'].get() or self.dsp_vars['master_bypass'].get()
 
-            # ── Spectrum (background layer) ──────────────────────────────────
-            buf = self.audio.spectrum_buffer.copy()
-            if np.abs(buf).max() > 1e-6:
-                win_fn = np.hanning(len(buf))
-                mag = np.abs(np.fft.rfft(buf * win_fn))
-                fft_freqs = np.fft.rfftfreq(len(buf), 1.0 / SR)
-                edges = np.logspace(np.log10(20), np.log10(20000), N_BANDS + 1)
+            # ── Spectrum bars (visible only when buffer has signal) ──────────
+            buf = self.audio.spectrum_buffer
+            if buf.size and np.abs(buf).max() > 1e-6:
+                mag = np.abs(np.fft.rfft(buf * cache['window']))
+                edge_xs = cache['edge_xs']
+                inv = 1.0 / len(buf)
                 for i in range(N_BANDS):
-                    mask = (fft_freqs >= edges[i]) & (fft_freqs < edges[i+1])
-                    if not mask.any(): continue
-                    db = 20 * np.log10(max(mag[mask].mean() / len(buf), 1e-10)) + 72
+                    mask = cache['edge_masks'][i]
+                    if not mask.any():
+                        cv.itemconfigure(cache['bars'][i], state='hidden')
+                        continue
+                    mean_mag = mag[mask].mean() * inv
+                    db = 20 * np.log10(max(mean_mag, 1e-10)) + 72
                     bar_h = max(0, min(h, db / 72 * h * 0.85))
-                    x0 = freq_to_x(edges[i],   w) + 1
-                    x1 = freq_to_x(edges[i+1], w) - 1
+                    x0 = edge_xs[i] + 1
+                    x1 = edge_xs[i+1] - 1
                     if x1 > x0 and bar_h > 0:
-                        cv.create_rectangle(x0, h - bar_h, x1, h, fill="#1a2e1a", outline="")
+                        cv.coords(cache['bars'][i], x0, h - bar_h, x1, h)
+                        cv.itemconfigure(cache['bars'][i], state='normal')
+                    else:
+                        cv.itemconfigure(cache['bars'][i], state='hidden')
+            else:
+                for bar_id in cache['bars']:
+                    cv.itemconfigure(bar_id, state='hidden')
 
-            y0 = gain_to_y(0, h)
-            cv.create_line(0, y0, w, y0, fill="#333333")
-            for gf, lbl in [(100, "100"), (1000, "1k"), (10000, "10k")]:
-                gx = freq_to_x(gf, w)
-                cv.create_line(gx, 0, gx, h, fill="#252525")
-                cv.create_text(gx+2, h-1, text=lbl, fill="#404040", font=("Helvetica", 6), anchor='sw')
-
-            freqs = np.logspace(np.log10(20), np.log10(20000), w)
+            # ── EQ curve ─────────────────────────────────────────────────────
+            freqs = cache['freqs_axis']
             total = np.clip(
                 low_shelf(freqs,  self.dsp_vars['eq_low'].get(),  self.dsp_vars['eq_low_freq'].get(),  self.dsp_vars['eq_low_q'].get()) +
                 peak(freqs,       self.dsp_vars['eq_mid'].get(),  self.dsp_vars['eq_mid_freq'].get(),  self.dsp_vars['eq_mid_q'].get()) +
                 high_shelf(freqs, self.dsp_vars['eq_high'].get(), self.dsp_vars['eq_high_freq'].get(), self.dsp_vars['eq_high_q'].get()),
                 -GAIN_MAX*1.5, GAIN_MAX*1.5)
-            pts = [c for i in range(w) for c in (i, gain_to_y(total[i], h))]
-            if len(pts) >= 4:
-                cv.create_line(*pts, fill="#444444" if bypassed else HIGHLIGHT, width=1.5, smooth=True)
+            ys = gain_to_y(total, h)
+            pts = np.empty(2 * w, dtype=np.float64)
+            pts[0::2] = np.arange(w)
+            pts[1::2] = ys
+            cv.coords(cache['curve'], *pts.tolist())
+            cv.itemconfigure(cache['curve'], fill="#444444" if bypassed else HIGHLIGHT)
 
-            hcol = "#444444" if bypassed else HIGHLIGHT
+            # ── Handles ──────────────────────────────────────────────────────
             for band, gvar, fvar in [
                 ('low',  self.dsp_vars['eq_low'],  self.dsp_vars['eq_low_freq']),
                 ('mid',  self.dsp_vars['eq_mid'],  self.dsp_vars['eq_mid_freq']),
@@ -1069,14 +1162,14 @@ class DJAppUI:
             ]:
                 hx = freq_to_x(fvar.get(), w)
                 hy = gain_to_y(gvar.get(), h)
-                active_band = band == _active['band']
                 if bypassed:
                     fill = "#444444"
-                elif active_band:
+                elif band == _active['band']:
                     fill = "#ffffff"
                 else:
                     fill = HIGHLIGHT
-                cv.create_oval(hx-HR, hy-HR, hx+HR, hy+HR, fill=fill, outline=BG_MAIN, width=1.5)
+                cv.coords(cache['handles'][band], hx-HR, hy-HR, hx+HR, hy+HR)
+                cv.itemconfigure(cache['handles'][band], fill=fill)
 
         def on_press(e):
             w, h = cv.winfo_width(), cv.winfo_height()
@@ -1941,7 +2034,7 @@ class DJAppUI:
             elif direction == 'right': self.play_next()
             elif direction in ['up', 'down']: self.handle_keyboard_scrub(direction)
         elif self.keys_down['v']:
-            offset = -1 if direction == 'up' else 1 if direction == 'down' else -5 if direction == 'left' else 5
+            offset = -1 if direction == 'up' else 1 if direction == 'down' else -10 if direction == 'left' else 10
             self.shift_track(offset)
         else:
             offset = -1 if direction == 'up' else 1 if direction == 'down' else -5 if direction == 'left' else 5
@@ -2004,24 +2097,60 @@ class DJAppUI:
 
     def shift_track(self, offset):
         idx = self.get_selected_idx()
-        if idx is not None:
-            self.push_undo()
-            new_idx = self.project.shift_track(idx, offset)
-            if idx != new_idx:
-                self.refresh_tree()
-                item = self.tree.get_children()[new_idx]
-                self.tree.selection_set(item)
-                self.tree.focus(item)
-                self.tree.see(item)
-                self.tree.event_generate("<<TreeviewSelect>>")
-                self.project.needs_save = True
+        if idx is None:
+            return
+        self.push_undo()
+        was_inactive = self.project.tracks[idx].get('inactive', False)
+        new_idx = self.project.shift_track(idx, offset)
+        if idx == new_idx:
+            return
+        children = self.tree.get_children()
+        if idx >= len(children):
+            self.refresh_tree()
+            self.select_track_by_index(new_idx)
+            self.project.needs_save = True
+            return
+        iid = children[idx]
+        try:
+            self.tree.move(iid, '', new_idx)
+        except tk.TclError:
+            self.refresh_tree()
+            self.select_track_by_index(new_idx)
+            self.project.needs_save = True
+            return
+        now_inactive = self.project.tracks[new_idx].get('inactive', False)
+        if now_inactive != was_inactive:
+            self._apply_inactive_visuals(iid, now_inactive)
+        lo, hi = min(idx, new_idx), max(idx, new_idx) + 1
+        self._renumber_rows(lo, hi)
+        self.tree.selection_set(iid)
+        self.tree.focus(iid)
+        self.tree.see(iid)
+        self.tree.event_generate("<<TreeviewSelect>>")
+        self.project.needs_save = True
 
     def toggle_inactive(self):
         idx = self.get_selected_idx()
         if idx is None: return
         self.push_undo()
         new_idx = self.project.toggle_inactive(idx)
-        self.refresh_tree()
+        children = self.tree.get_children()
+        if idx >= len(children):
+            self.refresh_tree()
+            self.select_track_by_index(new_idx)
+            self.project.needs_save = True
+            return
+        iid = children[idx]
+        try:
+            self.tree.move(iid, '', new_idx)
+        except tk.TclError:
+            self.refresh_tree()
+            self.select_track_by_index(new_idx)
+            self.project.needs_save = True
+            return
+        self._apply_inactive_visuals(iid, self.project.tracks[new_idx].get('inactive', False))
+        lo, hi = min(idx, new_idx), max(idx, new_idx) + 1
+        self._renumber_rows(lo, hi)
         self.select_track_by_index(new_idx)
         self.project.needs_save = True
 
@@ -2095,9 +2224,23 @@ class DJAppUI:
 
         if new_idx != src:
             self.push_undo()
+            was_inactive = self.project.tracks[src].get('inactive', False)
             offset = new_idx - src
             actual_new = self.project.shift_track(src, offset)
-            self.refresh_tree()
+            children = self.tree.get_children()
+            if src < len(children) and actual_new < len(self.project.tracks):
+                iid = children[src]
+                try:
+                    self.tree.move(iid, '', actual_new)
+                    now_inactive = self.project.tracks[actual_new].get('inactive', False)
+                    if now_inactive != was_inactive:
+                        self._apply_inactive_visuals(iid, now_inactive)
+                    lo, hi = min(src, actual_new), max(src, actual_new) + 1
+                    self._renumber_rows(lo, hi)
+                except tk.TclError:
+                    self.refresh_tree()
+            else:
+                self.refresh_tree()
             self.select_track_by_index(actual_new)
             self.project.needs_save = True
 
@@ -2255,13 +2398,23 @@ class DJAppUI:
 
     def modify_bpm(self, multiplier):
         idx = self.get_selected_idx()
-        if idx is not None:
-            self.push_undo()
-            self.project.modify_bpm(idx, multiplier)
+        if idx is None:
+            return
+        self.push_undo()
+        self.project.modify_bpm(idx, multiplier)
+        track = self.project.tracks[idx]
+        children = self.tree.get_children()
+        if idx < len(children):
+            cur_vals = list(self.tree.item(children[idx], 'values'))
+            if cur_vals:
+                cur_vals[1] = str(track['bpm'])
+                self.tree.item(children[idx], values=cur_vals)
+            if self.bpm_entry != self.root.focus_get():
+                self.bpm_var.set(str(track['bpm']))
+        else:
             self.refresh_tree()
-            item = self.tree.get_children()[idx]
-            self.tree.selection_set(item)
-            self.project.needs_save = True
+            self.select_track_by_index(idx)
+        self.project.needs_save = True
 
     def _on_bpm_edit(self, event=None):
         idx = self.get_selected_idx()
@@ -2289,7 +2442,17 @@ class DJAppUI:
         if not self.project.tracks: return
         self.push_undo()
         self.project.resort_by_bpm()
-        self.refresh_tree()
+        children = self.tree.get_children()
+        if len(children) != len(self.project.tracks):
+            self.refresh_tree()
+        else:
+            try:
+                for new_idx, track in enumerate(self.project.tracks):
+                    self.tree.move(track['filename'], '', new_idx)
+                self._renumber_rows()
+                self._refresh_sort_btn()
+            except tk.TclError:
+                self.refresh_tree()
         self.project.needs_save = True
 
     # ── Search ──────────────────────────────────────────────────────────────
@@ -2459,7 +2622,7 @@ class DJAppUI:
         if os.path.exists(default_art_path):
             try:
                 def_pil = Image.open(default_art_path).convert("RGBA")
-                def_pil = ImageOps.fit(def_pil, (36, 36), Image.Resampling.LANCZOS)
+                def_pil = ImageOps.fit(def_pil, (36, 36), Image.Resampling.BILINEAR)
             except Exception:
                 def_pil = None
         if def_pil is None:
@@ -2467,96 +2630,134 @@ class DJAppUI:
         self.default_thumb = ImageTk.PhotoImage(def_pil)
         self.default_thumb_dim = ImageTk.PhotoImage(ImageEnhance.Brightness(def_pil).enhance(0.25))
 
+    def _get_row_thumb(self, track):
+        # Drop the cache when the project folder changes — thumb filenames are
+        # only unique within a folder, so cross-project keys could collide.
+        if self._thumb_cache_folder != self.project.current_folder:
+            self._thumb_cache.clear()
+            self._thumb_cache_folder = self.project.current_folder
+
+        self._ensure_default_thumb()
+        is_inactive = track.get('inactive', False)
+        thumb_filename = track.get('thumb_filename', '')
+        key = (thumb_filename, is_inactive)
+        cached = self._thumb_cache.get(key)
+        if cached is not None:
+            return cached
+
+        photo = None
+        if thumb_filename and self.project.current_folder:
+            thumb_path = os.path.join(self.project.current_folder, thumb_filename)
+            if os.path.exists(thumb_path):
+                try:
+                    img = Image.open(thumb_path).convert("RGBA")
+                    img = ImageOps.fit(img, (36, 36), Image.Resampling.BILINEAR)
+                    if is_inactive:
+                        img = ImageEnhance.Brightness(img).enhance(0.25)
+                    photo = ImageTk.PhotoImage(img)
+                except Exception:
+                    photo = None
+
+        if photo is None:
+            photo = self.default_thumb_dim if is_inactive else self.default_thumb
+
+        self._thumb_cache[key] = photo
+        return photo
+
+    def _row_values(self, idx, track):
+        song = track.get('song', track.get('original_name', track['filename'])) or track['filename']
+        return (
+            f"{idx + 1}",
+            f"{track['bpm']}",
+            f"{track['tone']}",
+            song,
+            track.get('artist', ''),
+            track.get('album', ''),
+            f"{track.get('size_mb', 0.0):.1f}",
+            "●" if track.get('is_normalized', False) else "○",
+        )
+
+    def _renumber_rows(self, start=0, end=None):
+        children = self.tree.get_children()
+        if end is None:
+            end = len(children)
+        start = max(0, start)
+        end = min(end, len(children))
+        for i in range(start, end):
+            cur_vals = list(self.tree.item(children[i], 'values'))
+            new_num = str(i + 1)
+            if cur_vals and cur_vals[0] != new_num:
+                cur_vals[0] = new_num
+                self.tree.item(children[i], values=cur_vals)
+
+    def _apply_inactive_visuals(self, iid, is_inactive):
+        try:
+            idx = self.tree.index(iid)
+        except tk.TclError:
+            return
+        if idx >= len(self.project.tracks):
+            return
+        track = self.project.tracks[idx]
+        self.tree.item(
+            iid,
+            image=self._get_row_thumb(track),
+            tags=("inactive",) if is_inactive else (),
+        )
+
     def _append_track_to_tree(self, track):
         """Insert one track row without rebuilding the whole tree."""
-        self._ensure_default_thumb()
-        if not hasattr(self, 'tree_images'):
-            self.tree_images = {}
-
         # Identity lookup so duplicate-content dicts don't collide
         idx = next((i for i, t in enumerate(self.project.tracks) if t is track),
                    len(self.project.tracks) - 1)
 
         is_inactive = track.get('inactive', False)
-        song = track.get('song', track.get('original_name', track['filename'])) or track['filename']
+        thumb_img = self._get_row_thumb(track)
 
-        thumb_img = self.default_thumb_dim if is_inactive else self.default_thumb
-        thumb_filename = track.get('thumb_filename', '')
-        if thumb_filename:
-            thumb_path = os.path.join(self.project.current_folder, thumb_filename)
-            if os.path.exists(thumb_path):
-                try:
-                    img = Image.open(thumb_path).convert("RGBA")
-                    img = ImageOps.fit(img, (36, 36), Image.Resampling.LANCZOS)
-                    if is_inactive:
-                        img = ImageEnhance.Brightness(img).enhance(0.25)
-                    photo = ImageTk.PhotoImage(img)
-                    self.tree_images[idx] = photo
-                    thumb_img = photo
-                except Exception:
-                    pass
+        # Project.tracks already holds the new track at `idx`. Tree is being
+        # built in sync as each track is added, so `idx` is the correct
+        # insertion point.
+        insert_pos = idx if idx <= len(self.tree.get_children()) else tk.END
 
-        # Insert before the first inactive row so active tracks stay on top
-        insert_pos = tk.END
-        if not is_inactive:
-            for child in reversed(self.tree.get_children()):
-                if 'inactive' in self.tree.item(child, 'tags'):
-                    insert_pos = self.tree.index(child)
-                else:
-                    break
-
-        self.tree.insert("", insert_pos, text="", image=thumb_img or "", values=(
-            f"{idx + 1}", f"{track['bpm']}", f"{track['tone']}", song,
-            track.get('artist', ''), track.get('album', ''),
-            f"{track.get('size_mb', 0.0):.1f}",
-            "●" if track.get('is_normalized', False) else "○"
-        ), tags=("inactive",) if is_inactive else ())
+        try:
+            self.tree.insert(
+                "", insert_pos,
+                iid=track['filename'],
+                text="", image=thumb_img or "",
+                values=self._row_values(idx, track),
+                tags=("inactive",) if is_inactive else (),
+            )
+        except tk.TclError:
+            # iid collision (e.g. duplicate filename) — fall back to auto-iid
+            self.tree.insert(
+                "", insert_pos,
+                text="", image=thumb_img or "",
+                values=self._row_values(idx, track),
+                tags=("inactive",) if is_inactive else (),
+            )
         self.update_set_length_labels()
 
     def refresh_tree(self):
         for item in self.tree.get_children():
             self.tree.delete(item)
 
-        self.tree_images = {}
-        self.default_thumb = None  # Force refresh_tree to always regen thumbnails
-        self._ensure_default_thumb()
-
         for i, track in enumerate(self.project.tracks):
             is_inactive = track.get('inactive', False)
-            norm_dot = "●" if track.get('is_normalized', False) else "○"
-            size_str = f"{track.get('size_mb', 0.0):.1f}"
-
-            artist = track.get('artist', '')
-            album = track.get('album', '')
-            song = track.get('song', track.get('original_name', track['filename']))
-            if not song: song = track.get('original_name', track['filename'])
-
-            thumb_img = self.default_thumb_dim if is_inactive else self.default_thumb
-            thumb_filename = track.get('thumb_filename', '')
-            if thumb_filename:
-                thumb_path = os.path.join(self.project.current_folder, thumb_filename)
-                if os.path.exists(thumb_path):
-                    try:
-                        img = Image.open(thumb_path).convert("RGBA")
-                        img = ImageOps.fit(img, (36, 36), Image.Resampling.LANCZOS)
-                        if is_inactive:
-                            img = ImageEnhance.Brightness(img).enhance(0.25)
-                        photo = ImageTk.PhotoImage(img)
-                        self.tree_images[i] = photo
-                        thumb_img = photo
-                    except Exception:
-                        pass
-
-            self.tree.insert("", tk.END, text="", image=thumb_img if thumb_img else "", values=(
-                f"{i + 1}",
-                f"{track['bpm']}",
-                f"{track['tone']}",
-                song,
-                artist,
-                album,
-                size_str,
-                norm_dot
-            ), tags=("inactive",) if is_inactive else ())
+            thumb_img = self._get_row_thumb(track)
+            try:
+                self.tree.insert(
+                    "", tk.END,
+                    iid=track['filename'],
+                    text="", image=thumb_img or "",
+                    values=self._row_values(i, track),
+                    tags=("inactive",) if is_inactive else (),
+                )
+            except tk.TclError:
+                self.tree.insert(
+                    "", tk.END,
+                    text="", image=thumb_img or "",
+                    values=self._row_values(i, track),
+                    tags=("inactive",) if is_inactive else (),
+                )
         self.update_set_length_labels()
         self._refresh_sort_btn()
 

@@ -236,7 +236,7 @@ class ProjectActions:
                         from PIL import Image, ImageOps
                         import io
                         img = Image.open(io.BytesIO(art_bytes)).convert("RGBA")
-                        img = ImageOps.fit(img, (36, 36), Image.Resampling.LANCZOS)
+                        img = ImageOps.fit(img, (36, 36), Image.Resampling.BILINEAR)
                         thumb_name = f".thumb_{i}_{int(time.time())}.png"
                         thumb_dest = os.path.join(self.project.current_folder, thumb_name)
                         img.save(thumb_dest)

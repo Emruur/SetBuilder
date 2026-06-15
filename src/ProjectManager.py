@@ -3,7 +3,6 @@ import json
 import re
 import sys
 from pathlib import Path
-from mutagen.id3 import ID3, APIC
 
 class ProjectState:
     def __init__(self):
@@ -111,15 +110,37 @@ class ProjectState:
         return "", "", ""
 
     def get_track_artwork_bytes(self, filepath):
-        """Attempts to extract binary ID3 APIC data from an MP3 file."""
-        if not filepath.lower().endswith('.mp3'):
-            return None
+        """Returns embedded cover-art bytes from any common audio format, or None."""
         try:
-            tags = ID3(filepath)
-            # Fetch all Attached Picture tags
-            apic_tags = tags.getall('APIC')
-            if apic_tags:
-                return apic_tags[0].data
+            import mutagen
+            f = mutagen.File(filepath)
+            if f is None:
+                return None
+
+            # MP3 / ID3: APIC (v2.3/4) or PIC (v2.2), regardless of key suffix
+            tags = getattr(f, 'tags', None)
+            if tags is not None:
+                try:
+                    for frame in tags.values():
+                        fid = getattr(frame, 'FrameID', None) or type(frame).__name__
+                        data = getattr(frame, 'data', None)
+                        if fid in ('APIC', 'PIC') and data:
+                            return data
+                except Exception:
+                    pass
+
+            # FLAC / OGG: pictures attribute
+            pics = getattr(f, 'pictures', None)
+            if pics:
+                return pics[0].data
+
+            # MP4 / M4A: covr atom
+            try:
+                covr = f.tags.get('covr') if hasattr(f, 'tags') and f.tags else None
+                if covr:
+                    return bytes(covr[0])
+            except Exception:
+                pass
         except Exception:
             pass
         return None

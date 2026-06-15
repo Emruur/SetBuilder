@@ -35,14 +35,29 @@ class VinylAnimator:
     def process_selected_artwork(self, filename):
         if not self.project.current_folder or not filename: return
         full_path = os.path.join(self.project.current_folder, filename)
+        art_bytes = None
         if os.path.exists(full_path):
             try:
                 art_bytes = self.project.get_track_artwork_bytes(full_path)
-                self.generate_vinyl_processed_frame(art_bytes)
             except Exception:
-                self.generate_vinyl_processed_frame(None)
-        else:
-            self.generate_vinyl_processed_frame(None)
+                art_bytes = None
+
+        # Fallback: if the audio file has no extractable cover but a saved
+        # thumb PNG exists for this track, use it so the vinyl never shows
+        # the default when the row already has artwork.
+        if not art_bytes:
+            track = next((t for t in self.project.tracks if t.get('filename') == filename), None)
+            thumb = track.get('thumb_filename', '') if track else ''
+            if thumb:
+                thumb_path = os.path.join(self.project.current_folder, thumb)
+                if os.path.exists(thumb_path):
+                    try:
+                        with open(thumb_path, 'rb') as fh:
+                            art_bytes = fh.read()
+                    except Exception:
+                        art_bytes = None
+
+        self.generate_vinyl_processed_frame(art_bytes)
 
     def vinyl_rotation_check_loop(self):
         if self.target_spin_speed > 0:
@@ -60,7 +75,7 @@ class VinylAnimator:
 
     def draw_tk_vinyl_frame_to_canvas(self):
         if not self.current_rotation_pil_frame: return
-        rotated_pil = self.current_rotation_pil_frame.rotate(self.current_angle, resample=Image.Resampling.BICUBIC)
+        rotated_pil = self.current_rotation_pil_frame.rotate(self.current_angle, resample=Image.Resampling.BILINEAR)
         self.vinyl_tk_image_ref = ImageTk.PhotoImage(rotated_pil)
         center_c = (VINYL_SIZE + 20) // 2
         self.canvas.delete("record")
