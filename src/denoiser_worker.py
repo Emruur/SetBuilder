@@ -35,6 +35,12 @@ def run(source_path):
     import audio_separator.separator.separator as _sep_mod
     import audio_separator.separator.architectures.mdxc_separator as _mdxc_mod
 
+    # audio_separator calls check_ffmpeg_installed() at Separator.__init__ and
+    # uses pydub (ffmpeg) for output writing. Both are unnecessary: the base app
+    # converts input to WAV before passing here so librosa reads it fine, and
+    # use_soundfile=True below tells audio_separator to write via soundfile instead.
+    _sep_mod.Separator.check_ffmpeg_installed = lambda self: None
+
     model_dir = _model_dir()
     os.makedirs(model_dir, exist_ok=True)
 
@@ -80,6 +86,7 @@ def run(source_path):
             output_format='WAV',
             log_level=30,
             use_autocast=True,
+            use_soundfile=True,
             mdxc_params={
                 'segment_size': 256,
                 'batch_size': 1,
