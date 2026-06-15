@@ -22,7 +22,7 @@ from AudioCore import AudioEngine
 from ProjectManager import ProjectState
 from PIL import Image, ImageTk, ImageOps, ImageEnhance
 
-from constants import BG_MAIN, BG_LIST, FG_TEXT, BTN_NORMAL, BTN_HOVER, HIGHLIGHT, BORDER, VINYL_SIZE, CENTER_HOLE, DENOISER_DOWNLOAD_URL, DENOISER_INSTALL_DIR, DENOISER_VERSION
+from constants import BG_MAIN, BG_LIST, FG_TEXT, BTN_NORMAL, BTN_HOVER, HIGHLIGHT, BORDER, VINYL_SIZE, CENTER_HOLE, DENOISER_DOWNLOAD_URL, DENOISER_INSTALL_DIR, DENOISER_VERSION, APP_VERSION, RELEASE_API_URL
 from ui_components import create_btn, create_group_frame, Knob, Timeline
 from export_dialog import ExportDialog
 from vinyl_animator import VinylAnimator
@@ -91,6 +91,304 @@ class DJAppUI:
         
         threading.Thread(target=self.autosave_daemon, daemon=True).start()
 
+    # ── OS menu bar (Reset + Updates) ───────────────────────────────────────
+
+    def _build_menubar(self):
+        menubar = tk.Menu(self.root)
+        app_menu = tk.Menu(menubar, tearoff=0)
+        menubar.add_cascade(label="SetBuilder", menu=app_menu)
+        app_menu.add_command(label="Check for Updates…", command=self._check_for_updates)
+        app_menu.add_separator()
+        app_menu.add_command(label="Reset SetBuilder…", command=self._reset_app)
+        try:
+            self.root.config(menu=menubar)
+        except tk.TclError:
+            pass
+
+    # --- Reset ---
+
+    def _find_clear_app_script(self):
+        if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+            candidate = os.path.join(sys._MEIPASS, 'clear_app.sh')
+            if os.path.isfile(candidate):
+                return candidate
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        candidate = os.path.join(repo_root, 'clear_app.sh')
+        if os.path.isfile(candidate):
+            return candidate
+        return None
+
+    def _reset_app(self):
+        from tkinter import messagebox
+        msg = (
+            "This will permanently delete:\n\n"
+            "  • All SetBuilder settings (~/Library/Application Support/SetBuilder)\n"
+            "  • The SetBuilder.app bundle (/Applications and ~/Applications)\n"
+            "  • The SetBuilderDenoiser.app companion, if installed\n\n"
+            "Your project folders are NOT affected.\n\n"
+            "The app will close immediately. Continue?"
+        )
+        if not messagebox.askyesno("Reset SetBuilder", msg, icon='warning'):
+            return
+
+        import subprocess
+        script = self._find_clear_app_script()
+        if script:
+            # Copy the script to /tmp so that removing the bundle — which
+            # contains the original — doesn't yank the file out from under
+            # bash mid-execution.
+            try:
+                import shutil, tempfile
+                staging = tempfile.mkdtemp(prefix='SetBuilder-reset-')
+                staged = os.path.join(staging, 'clear_app.sh')
+                shutil.copy2(script, staged)
+                os.chmod(staged, 0o755)
+                cmd = ['/bin/bash', staged]
+            except Exception:
+                cmd = ['/bin/bash', script]
+        else:
+            # Fallback: inline equivalent of clear_app.sh so a missing script
+            # still resets a dev / unbundled run cleanly.
+            inline = (
+                "pkill -x SetBuilder 2>/dev/null; "
+                "pkill -x SetBuilderDenoiser 2>/dev/null; "
+                "rm -rf ~/Library/Application\\ Support/SetBuilder/; "
+                "rm -rf /Applications/SetBuilder.app 2>/dev/null; "
+                "rm -rf /Applications/SetBuilderDenoiser.app 2>/dev/null; "
+                "rm -rf ~/Applications/SetBuilder.app 2>/dev/null; "
+                "rm -rf ~/Applications/SetBuilderDenoiser.app 2>/dev/null"
+            )
+            cmd = ['/bin/bash', '-c', inline]
+
+        try:
+            subprocess.Popen(
+                cmd,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as e:
+            messagebox.showerror("Reset Failed", f"Could not launch reset script:\n\n{e}")
+            return
+        try:
+            self.root.destroy()
+        except Exception:
+            pass
+
+    # --- Updates ---
+
+    @staticmethod
+    def _version_tuple(s):
+        out = []
+        for part in str(s).lstrip('vV').split('.'):
+            try:
+                out.append(int(part))
+            except ValueError:
+                # Treat suffixes like "2.0-beta1" as < "2.0"
+                digits = ''.join(ch for ch in part if ch.isdigit())
+                out.append(int(digits) if digits else 0)
+        return tuple(out) if out else (0,)
+
+    def _get_app_bundle_path(self):
+        if not getattr(sys, 'frozen', False):
+            return None
+        exe = os.path.abspath(sys.executable)
+        parts = exe.split(os.sep)
+        for i in range(len(parts) - 1, -1, -1):
+            if parts[i].endswith('.app'):
+                return os.sep.join(parts[:i + 1])
+        return None
+
+    def _check_for_updates(self):
+        # Run the network probe off the UI thread; results dispatch back via after().
+        threading.Thread(target=self._check_for_updates_worker, daemon=True).start()
+
+    def _check_for_updates_worker(self):
+        from tkinter import messagebox
+        try:
+            import urllib.request, json
+            req = urllib.request.Request(
+                RELEASE_API_URL,
+                headers={'User-Agent': f'SetBuilder/{APP_VERSION}'},
+            )
+            with urllib.request.urlopen(req, timeout=15) as r:
+                data = json.loads(r.read().decode('utf-8'))
+        except Exception as e:
+            self.root.after(0, lambda: messagebox.showerror(
+                "Update Check Failed", f"Could not reach GitHub:\n\n{e}"))
+            return
+
+        latest = (data.get('tag_name') or '').lstrip('vV')
+        if not latest:
+            self.root.after(0, lambda: messagebox.showerror(
+                "Update Check Failed", "GitHub did not return a release tag."))
+            return
+
+        if self._version_tuple(latest) <= self._version_tuple(APP_VERSION):
+            self.root.after(0, lambda: messagebox.showinfo(
+                "Up to date", f"SetBuilder {APP_VERSION} is the latest version."))
+            return
+
+        # Pick the macOS .zip asset. Heuristic: ends with .zip, no 'win',
+        # and excludes the denoiser companion bundle.
+        asset = None
+        for a in data.get('assets', []):
+            name = (a.get('name') or '').lower()
+            if not name.endswith('.zip'): continue
+            if 'win' in name: continue
+            if 'denoiser' in name: continue
+            asset = a
+            break
+
+        if not asset:
+            url = data.get('html_url') or 'https://github.com/Emruur/SetBuilder/releases'
+            self.root.after(0, lambda u=url, v=latest: messagebox.showinfo(
+                "Update Available",
+                f"SetBuilder {v} is available, but no macOS .zip asset was attached "
+                f"to the release.\n\nOpen the release page to download manually."))
+            self.root.after(0, lambda u=url: self._open_url(u))
+            return
+
+        url = asset['browser_download_url']
+        size = int(asset.get('size') or 0)
+        self.root.after(0, self._prompt_install_update, latest, url, size)
+
+    def _open_url(self, url):
+        try:
+            import webbrowser
+            webbrowser.open(url)
+        except Exception:
+            pass
+
+    def _prompt_install_update(self, version, url, size):
+        from tkinter import messagebox
+        size_mb = size / (1024 * 1024) if size else 0
+        size_str = f"{size_mb:.1f} MB" if size_mb else "size unknown"
+        if not messagebox.askyesno(
+            "Update Available",
+            f"SetBuilder {version} is available (you have {APP_VERSION}).\n\n"
+            f"Download size: {size_str}\n\n"
+            "Download and install now? The app will close and relaunch automatically.",
+        ):
+            return
+
+        if not getattr(sys, 'frozen', False) or not self._get_app_bundle_path():
+            # In dev mode there is no .app to replace — just open the page.
+            messagebox.showinfo(
+                "Dev Mode",
+                "Running from source — auto-install is only available in the bundled app.\n\n"
+                "Opening the release page so you can grab the new version.",
+            )
+            self._open_url(url)
+            return
+
+        self._download_and_install_update(version, url)
+
+    def _download_and_install_update(self, version, url):
+        win = tk.Toplevel(self.root)
+        win.title("Downloading update…")
+        win.configure(bg=BG_MAIN)
+        win.resizable(False, False)
+        win.transient(self.root)
+        tk.Label(win, text=f"Downloading SetBuilder {version}…",
+                 bg=BG_MAIN, fg=FG_TEXT, font=("Helvetica", 10)).pack(padx=20, pady=(15, 8))
+        pvar = tk.DoubleVar(value=0.0)
+        ttk.Progressbar(win, variable=pvar, maximum=100, length=380).pack(padx=20, pady=(0, 8))
+        status_lbl = tk.Label(win, text="Connecting…", bg=BG_MAIN, fg="#aaaaaa",
+                              font=("Helvetica", 9))
+        status_lbl.pack(padx=20, pady=(0, 15))
+
+        def worker():
+            from tkinter import messagebox
+            import urllib.request, tempfile
+            try:
+                tmpdir = tempfile.mkdtemp(prefix='SetBuilder-update-')
+                zip_path = os.path.join(tmpdir, 'SetBuilder.zip')
+                req = urllib.request.Request(url, headers={'User-Agent': f'SetBuilder/{APP_VERSION}'})
+                with urllib.request.urlopen(req, timeout=30) as r:
+                    total = int(r.headers.get('Content-Length') or 0)
+                    downloaded = 0
+                    with open(zip_path, 'wb') as f:
+                        while True:
+                            chunk = r.read(64 * 1024)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                            downloaded += len(chunk)
+                            if total > 0:
+                                pct = downloaded / total * 100
+                                mb_done = downloaded / (1024 * 1024)
+                                mb_total = total / (1024 * 1024)
+                                self.root.after(0, pvar.set, pct)
+                                self.root.after(0, status_lbl.config,
+                                                {'text': f"{mb_done:.1f} / {mb_total:.1f} MB"})
+                self.root.after(0, status_lbl.config, {'text': "Preparing installer…"})
+                self.root.after(0, self._spawn_installer_and_quit, zip_path, win)
+            except Exception as e:
+                self.root.after(0, win.destroy)
+                self.root.after(0, lambda: messagebox.showerror(
+                    "Update Failed", f"Download failed:\n\n{e}"))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _spawn_installer_and_quit(self, zip_path, progress_win):
+        from tkinter import messagebox
+        app_path = self._get_app_bundle_path()
+        if not app_path:
+            try: progress_win.destroy()
+            except Exception: pass
+            messagebox.showerror("Update Failed",
+                                 "Could not determine the SetBuilder.app path. Install manually.")
+            return
+
+        import subprocess, tempfile
+        # Write the installer to a stable temp dir so it survives this process exit.
+        installer_dir = tempfile.mkdtemp(prefix='SetBuilder-installer-')
+        installer_path = os.path.join(installer_dir, 'install_update.sh')
+        # Single-quote the paths inside the script so spaces in /Applications etc. are safe.
+        script = (
+            "#!/usr/bin/env bash\n"
+            "set -e\n"
+            f"APP_PATH={self._sh_quote(app_path)}\n"
+            f"ZIP_PATH={self._sh_quote(zip_path)}\n"
+            'PARENT="$(dirname "$APP_PATH")"\n'
+            '# Wait up to ~30s for SetBuilder to exit\n'
+            'for _ in $(seq 1 60); do\n'
+            '    if ! pgrep -x SetBuilder >/dev/null 2>&1; then break; fi\n'
+            '    sleep 0.5\n'
+            'done\n'
+            'rm -rf "$APP_PATH"\n'
+            'unzip -q -o "$ZIP_PATH" -d "$PARENT"\n'
+            'rm -f "$ZIP_PATH"\n'
+            '# Clear macOS quarantine so Gatekeeper doesn\'t block the relaunch\n'
+            'xattr -dr com.apple.quarantine "$APP_PATH" 2>/dev/null || true\n'
+            'open "$APP_PATH"\n'
+        )
+        try:
+            with open(installer_path, 'w') as f:
+                f.write(script)
+            os.chmod(installer_path, 0o755)
+            subprocess.Popen(
+                ['/bin/bash', installer_path],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except Exception as e:
+            try: progress_win.destroy()
+            except Exception: pass
+            messagebox.showerror("Update Failed", f"Could not start installer:\n\n{e}")
+            return
+
+        try: progress_win.destroy()
+        except Exception: pass
+        try: self.root.destroy()
+        except Exception: pass
+
+    @staticmethod
+    def _sh_quote(s):
+        return "'" + str(s).replace("'", "'\\''") + "'"
+
     def autosave_daemon(self):
         while True:
             time.sleep(1.0)
@@ -153,6 +451,8 @@ class DJAppUI:
         return create_group_frame(parent, padx, pady)
 
     def setup_ui(self):
+        self._build_menubar()
+
         style = ttk.Style()
         style.theme_use('clam')
         style.configure("TProgressbar", background=HIGHLIGHT, troughcolor=BG_LIST)

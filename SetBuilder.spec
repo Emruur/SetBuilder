@@ -7,6 +7,8 @@ block_cipher = None
 _datas = [('assets/default.png', 'assets')]
 if _os.path.exists('assets/ffmpeg'):
     _datas.append(('assets/ffmpeg', '.'))
+if _os.path.exists('clear_app.sh'):
+    _datas.append(('clear_app.sh', '.'))
 
 a = Analysis(
     ['src/main.py'],

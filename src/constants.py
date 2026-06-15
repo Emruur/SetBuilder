@@ -14,3 +14,8 @@ CENTER_HOLE = 12
 DENOISER_DOWNLOAD_URL = "https://github.com/Emruur/SetBuilder/releases/download/v2.0/SetBuilderDenoiser.zip"
 DENOISER_INSTALL_DIR  = "~/Library/Application Support/SetBuilder"
 DENOISER_VERSION      = "2.0"  # bump whenever the companion protocol changes
+
+# Current SetBuilder app version. Used by the in-app updater to decide
+# whether the GitHub latest release is newer than what's installed.
+APP_VERSION    = "2.0"
+RELEASE_API_URL = "https://api.github.com/repos/Emruur/SetBuilder/releases/latest"
