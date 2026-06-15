@@ -1,13 +1,11 @@
 import os
 import shutil
-import subprocess
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 
 from constants import BG_MAIN, BG_LIST, FG_TEXT, HIGHLIGHT, BTN_NORMAL, BTN_HOVER
 from ui_components import create_btn
-from AudioCore import get_ffmpeg_path
 
 class ExportDialog:
     def __init__(self, app):
@@ -180,21 +178,15 @@ class ExportDialog:
             folder_basename = os.path.basename(self.app.project.current_folder) or "DJ_Set"
             final_name = f"{folder_basename}_Continuous.mp3"
             final_path = os.path.join(export_dir, final_name)
-            list_path = os.path.join(export_dir, ".concat_list.txt")
             try:
-                with open(list_path, 'w') as fh:
+                with open(final_path, 'wb') as out_fh:
                     for p in temp_paths:
-                        escaped = p.replace("'", "'\\''")
-                        fh.write(f"file '{escaped}'\n")
-
-                cmd = [get_ffmpeg_path(), '-y', '-f', 'concat', '-safe', '0', '-i', list_path, '-c', 'copy', final_path]
-                subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                        with open(p, 'rb') as in_fh:
+                            out_fh.write(in_fh.read())
             finally:
                 for p in temp_paths:
                     try: os.remove(p)
                     except Exception: pass
-                try: os.remove(list_path)
-                except Exception: pass
 
             self.app.root.after(0, self.render_progress_var.set, 100.0)
             self.app.root.after(0, self.lbl_render_status.config, {"text": "Done."})

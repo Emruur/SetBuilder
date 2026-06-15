@@ -116,10 +116,14 @@ class ProjectActions:
                     "lufs": float(t.get("lufs", -14.0)), "size_mb": float(t.get("size_mb", 0.0)),
                     "is_normalized": t.get("is_normalized", self.project.settings.get("normalized", False)),
                     "inactive": bool(t.get("inactive", False)),
+                    "denoised_filename": t.get("denoised_filename", ""),
+                    "noise_filename": t.get("noise_filename", ""),
+                    "use_denoised": bool(t.get("use_denoised", False)),
+                    "denoise_mix": float(t.get("denoise_mix", 1.0)),
                     "dsp_state": t.get("dsp_state", {
                         'master_bypass': True,
                         'chain_order': ['eq', 'dyn'],
-                        'eq_bypass': True, 'eq_low': 0.0, 'eq_mid': 0.0, 'eq_high': 0.0,
+                        'eq_bypass': True, 'eq_low': 0.0, 'eq_mid': 0.0, 'eq_high': 0.0, 'eq_low_freq': 250.0, 'eq_mid_freq': 1000.0, 'eq_high_freq': 4000.0, 'eq_low_q': 0.707, 'eq_mid_q': 1.0, 'eq_high_q': 0.707,
                         'dyn_bypass': True, 'dyn_threshold': 0.0, 'dyn_ratio': 1.0, 'dyn_attack': 5.0, 'dyn_release': 100.0, 'dyn_makeup': 0.0,
                         'limiter_bypass': True, 'limiter_softclip': False, 'limiter_input': 0.0, 'limiter_output': 0.0,
                         'vsts': {}
@@ -211,7 +215,6 @@ class ProjectActions:
     def add_tracks_worker(self, filepaths, normalize_new, select_first_at_end=False):
         total, lufs_target = len(filepaths), self.project.settings.get("lufs_target", -14.0)
         new_filenames = []
-        self.root.after(0, self.app.start_import_spinner, total)
         for i, filepath in enumerate(filepaths):
             path_obj, ext = Path(filepath), Path(filepath).suffix.lower()
             original_name = self.project.clean_name(path_obj.name) 
@@ -250,7 +253,7 @@ class ProjectActions:
                     'dsp_state': {
                         'master_bypass': True,
                         'chain_order': ['eq', 'dyn'],
-                        'eq_bypass': True, 'eq_low': 0.0, 'eq_mid': 0.0, 'eq_high': 0.0,
+                        'eq_bypass': True, 'eq_low': 0.0, 'eq_mid': 0.0, 'eq_high': 0.0, 'eq_low_freq': 250.0, 'eq_mid_freq': 1000.0, 'eq_high_freq': 4000.0, 'eq_low_q': 0.707, 'eq_mid_q': 1.0, 'eq_high_q': 0.707,
                         'dyn_bypass': True, 'dyn_threshold': 0.0, 'dyn_ratio': 1.0, 'dyn_attack': 5.0, 'dyn_release': 100.0, 'dyn_makeup': 0.0,
                         'limiter_bypass': True, 'limiter_softclip': False, 'limiter_input': 0.0, 'limiter_output': 0.0,
                         'vsts': {}
@@ -261,10 +264,8 @@ class ProjectActions:
                 self.root.after(0, self.app._append_track_to_tree, new_track)
             except Exception as e: print(f"Error adding track: {e}")
             self.root.after(0, self.app.progress_var.set, ((i + 1) / total) * 100)
-            self.root.after(0, self.app.update_import_spinner, total - (i + 1))
 
         def on_done():
-            self.app.update_import_spinner(0)
             self.app.lbl_folder.config(text=f"Loaded: {os.path.basename(self.project.current_folder)}")
             self.app.btn_add.config(state=tk.NORMAL)
             self.app.progress_bar.pack_forget()

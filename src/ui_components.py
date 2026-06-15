@@ -27,14 +27,16 @@ def create_group_frame(parent, padx=5, pady=5):
     return f
 
 class Knob(tk.Canvas):
-    def __init__(self, parent, variable, from_, to_, command=None, size=36, *args, **kwargs):
-        super().__init__(parent, width=size, height=size, bg=BG_MAIN, highlightthickness=0, *args, **kwargs)
+    def __init__(self, parent, variable, from_, to_, command=None, size=36, pill=False, *args, **kwargs):
+        bg = BG_LIST if pill else BG_MAIN
+        super().__init__(parent, width=size, height=size, bg=bg, highlightthickness=0, *args, **kwargs)
         self.variable = variable
         self.from_ = from_
         self.to_ = to_
         self.command = command
         self.size = size
         self.disabled = False
+        self.pill = pill  # rounded pill bg: dark oval on BG_LIST canvas
         self.bind("<ButtonPress-1>", self.on_press)
         self.bind("<B1-Motion>", self.on_drag)
         self.variable.trace_add('write', self.draw)
@@ -47,7 +49,7 @@ class Knob(tk.Canvas):
 
     def on_drag(self, event):
         dy = self.start_y - event.y
-        new_val = self.start_val + (dy / 100.0) * (self.to_ - self.from_) # 100px vertical drag = full range
+        new_val = self.start_val + (dy / 100.0) * (self.to_ - self.from_)
         new_val = max(self.from_, min(self.to_, new_val))
         self.variable.set(new_val)
         if self.command: self.command()
@@ -63,7 +65,13 @@ class Knob(tk.Canvas):
         outline_color = "#555555" if self.disabled else HIGHLIGHT
         m = 4
         s = self.size - m
-        self.create_arc(m, m, s, s, start=-45, extent=270, style=tk.ARC, outline=BG_LIST, width=3)
+        if self.pill:
+            # Dark rounded pill bg so knob is visible on BG_LIST parent
+            self.create_oval(1, 1, self.size - 1, self.size - 1, fill=BG_MAIN, outline="")
+            track_color = BORDER
+        else:
+            track_color = BG_LIST
+        self.create_arc(m, m, s, s, start=-45, extent=270, style=tk.ARC, outline=track_color, width=3)
         self.create_arc(m, m, s, s, start=225, extent=-270*pct, style=tk.ARC, outline=outline_color, width=3)
 
 class Timeline(tk.Canvas):

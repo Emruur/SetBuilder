@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""SetBuilder Denoiser — companion process. ML inference only; no ffmpeg.
+"""SetBuilder Denoiser — companion process. ML inference only.
 
 Writes newline-delimited JSON to stdout:
   {"type": "progress", "stage": "download"|"inference", "pct": 0-100}
@@ -7,7 +7,7 @@ Writes newline-delimited JSON to stdout:
   {"type": "done", "dry_wav": "...", "noise_wav": "...", "tmp_dir": "..."}
   {"type": "error", "message": "..."}
 
-The base app receives the WAV paths and handles ffmpeg conversion itself.
+The base app receives the WAV paths and handles WAV→MP3 conversion via pedalboard.
 """
 import sys
 import os
@@ -104,7 +104,7 @@ def run(source_path):
         if not dry:
             raise RuntimeError(f'No dry stem found in: {wavs}')
 
-        # Emit paths — base app handles ffmpeg conversion using its own binary
+        # Emit paths — base app handles WAV→MP3 conversion via pedalboard
         emit({
             'type':      'done',
             'dry_wav':   os.path.join(tmp_dir, dry[0]),

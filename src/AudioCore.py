@@ -25,10 +25,6 @@ os.environ['NUMBA_CACHE_DIR'] = cache_dir
 import librosa
 from pedalboard import Pedalboard, Compressor, HighShelfFilter, LowShelfFilter, PeakFilter, Distortion, Limiter, Gain, load_plugin
 
-def get_ffmpeg_path():
-    """Returns ffmpeg path — kept for any remaining ffmpeg calls (e.g. Windows export)."""
-    ffmpeg_exe = "ffmpeg.exe" if sys.platform == "win32" else "ffmpeg"
-    return ffmpeg_exe
 class AudioEngine:
     def __init__(self):
         self.is_paused = False
@@ -382,7 +378,7 @@ class AudioEngine:
 
         import json, shutil
 
-        # Companion only takes --input; base app handles ffmpeg conversion
+        # Companion only takes --input; base app handles WAV→MP3 via pedalboard
         cmd = ([sys.executable, companion_path] if is_script else [companion_path]) + [
             '--input', str(source_path),
         ]
@@ -458,112 +454,6 @@ class AudioEngine:
 
         if proc.returncode != 0:
             raise RuntimeError(f'Denoiser companion exited with code {proc.returncode}')
-
-    @staticmethod
-    def denoise_track(source_path, dest_path, noise_dest_path=None, download_cb=None, download_done_cb=None, inference_cb=None):
-        """Denoise using Mel-Band-Roformer (audio-separator). SDR ~28dB, music-safe.
-
-        download_cb(pct)      — 0-100 during model download (omitted if already cached)
-        download_done_cb()    — called once download finishes, before inference starts
-        inference_cb(pct)     — 0-100 during chunk inference
-        """
-        from audio_separator.separator import Separator
-        import audio_separator.separator.separator as _sep_mod
-        import audio_separator.separator.architectures.mdxc_separator as _mdxc_mod
-        import tempfile, shutil
-
-        os.makedirs(os.path.dirname(dest_path), exist_ok=True)
-
-        model_dir = AudioEngine.denoise_model_dir()
-        os.makedirs(model_dir, exist_ok=True)
-
-        # --- Download proxy (update/close pattern used by separator.py) ---
-        if download_cb:
-            class _DownloadProxy:
-                def __init__(self, total=0, **_kw):
-                    self._total = total
-                    self._done = 0
-                def update(self, n=1):
-                    self._done += n
-                    if self._total > 0:
-                        download_cb(self._done / self._total * 100.0)
-                def close(self): pass
-                def __enter__(self): return self
-                def __exit__(self, *_): pass
-            _orig_sep_tqdm = _sep_mod.tqdm
-            _sep_mod.tqdm = _DownloadProxy
-
-        # --- Inference proxy (iterable pattern used by mdxc_separator.py) ---
-        if inference_cb:
-            class _InferenceProxy:
-                def __init__(self, iterable=None, **_kw):
-                    self._items = list(iterable) if iterable is not None else []
-                    self._n = len(self._items)
-                def __iter__(self):
-                    for i, item in enumerate(self._items):
-                        yield item
-                        if self._n > 0:
-                            inference_cb((i + 1) / self._n * 98.0)
-                def __enter__(self): return self
-                def __exit__(self, *_): pass
-            _orig_mdxc_tqdm = _mdxc_mod.tqdm
-            _mdxc_mod.tqdm = _InferenceProxy
-
-        tmp_dir = tempfile.mkdtemp()
-        try:
-            sep = Separator(
-                model_file_dir=model_dir,
-                output_dir=tmp_dir,
-                output_format='WAV',
-                log_level=30,
-                use_autocast=True,
-                mdxc_params={
-                    'segment_size': 256,
-                    'batch_size': 1,
-                    'overlap': 4,
-                    'override_model_segment_size': False,
-                    'pitch_shift': 0,
-                },
-            )
-            sep.load_model(AudioEngine.DENOISE_MODEL)
-            if download_cb:
-                _sep_mod.tqdm = _orig_sep_tqdm
-            if download_done_cb:
-                download_done_cb()
-            output_files = sep.separate(source_path)
-
-            wavs = [f for f in os.listdir(tmp_dir) if f.lower().endswith('.wav')]
-            if not wavs:
-                raise RuntimeError(f"No output WAV found in {tmp_dir}. "
-                                   f"Separator returned: {output_files}")
-            dry = [f for f in wavs if '(dry)' in f.lower()]
-            noise_wavs = [f for f in wavs if f not in dry]
-            if not dry:
-                raise RuntimeError(f"No dry stem found in output: {wavs}")
-            denoised_wav = os.path.join(tmp_dir, dry[0])
-
-            # Convert dry stem to MP3 (copy artwork/tags from source)
-            cmd = [get_ffmpeg_path(), '-y',
-                   '-i', denoised_wav, '-i', str(source_path),
-                   '-map', '0:a:0', '-map', '1:v:0?', '-map_metadata', '1',
-                   '-c:v', 'copy', '-codec:a', 'libmp3lame', '-q:a', '0',
-                   '-id3v2_version', '3', str(dest_path)]
-            subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-            # Convert noise stem to MP3 if caller wants it
-            if noise_dest_path and noise_wavs:
-                os.makedirs(os.path.dirname(noise_dest_path), exist_ok=True)
-                cmd_n = [get_ffmpeg_path(), '-y',
-                         '-i', os.path.join(tmp_dir, noise_wavs[0]),
-                         '-codec:a', 'libmp3lame', '-q:a', '2', str(noise_dest_path)]
-                subprocess.run(cmd_n, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        finally:
-            if download_cb:
-                _sep_mod.tqdm = _orig_sep_tqdm
-            if inference_cb:
-                _mdxc_mod.tqdm = _orig_mdxc_tqdm
-                inference_cb(100.0)
-            shutil.rmtree(tmp_dir, ignore_errors=True)
 
     def convert_to_mp3(self, source_path, dest_path, normalize=False, lufs=-14.0, volume=1.0):
         """Transcodes imported wav/flac/mp3 files to mp3 using pedalboard (no ffmpeg)."""

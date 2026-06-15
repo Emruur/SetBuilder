@@ -145,6 +145,10 @@ class ProjectState:
                 "size_mb": track.get('size_mb', 0.0),
                 "is_normalized": track.get('is_normalized', False),
                 "inactive": track.get('inactive', False),
+                "denoised_filename": track.get('denoised_filename', ''),
+                "noise_filename": track.get('noise_filename', ''),
+                "use_denoised": track.get('use_denoised', False),
+                "denoise_mix": float(track.get('denoise_mix', 1.0)),
                 "dsp_state": track.get('dsp_state', {
                     'master_bypass': True,
                     'chain_order': ['eq', 'dyn'],
