@@ -374,13 +374,26 @@ class AudioEngine:
                                noise_dest_path=None, download_cb=None,
                                download_done_cb=None, inference_cb=None):
         """Spawn the companion process and relay JSON progress to callbacks."""
-        import json
+        import json, shutil, tempfile
+        from pedalboard.io import AudioFile
 
-        import json, shutil
+        # audio_separator uses ffmpeg internally to decode non-WAV inputs.
+        # Pre-convert to a temp WAV here so the companion always receives a WAV
+        # and needs no ffmpeg at all.
+        tmp_wav_dir = None
+        actual_input = str(source_path)
+        if not actual_input.lower().endswith('.wav'):
+            tmp_wav_dir = tempfile.mkdtemp()
+            tmp_wav = os.path.join(tmp_wav_dir, 'input.wav')
+            with AudioFile(actual_input) as f:
+                audio = f.read(f.frames)
+                sr    = f.samplerate
+            sf.write(tmp_wav, audio.T, sr)
+            actual_input = tmp_wav
 
         # Companion only takes --input; base app handles WAV→MP3 via pedalboard
         cmd = ([sys.executable, companion_path] if is_script else [companion_path]) + [
-            '--input', str(source_path),
+            '--input', actual_input,
         ]
 
         proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
@@ -451,6 +464,8 @@ class AudioEngine:
             proc.wait()
             if tmp_dir:
                 shutil.rmtree(tmp_dir, ignore_errors=True)
+            if tmp_wav_dir:
+                shutil.rmtree(tmp_wav_dir, ignore_errors=True)
 
         if proc.returncode != 0:
             raise RuntimeError(f'Denoiser companion exited with code {proc.returncode}')
